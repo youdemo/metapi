@@ -4,6 +4,34 @@
 
 ---
 
+## Zeabur 一键部署
+
+<a href="https://zeabur.com/templates/DOX5PR">
+  <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
+</a>
+
+点击按钮即可一键部署到 [Zeabur](https://zeabur.com)，无需手动配置 Docker 或服务器。
+
+模板会自动完成：
+
+- 拉取 `1467078763/metapi:latest` 镜像
+- 配置 HTTP 端口（4000）
+- 挂载持久化存储（`/app/data`）
+- 分配域名
+
+部署时需要填写以下变量：
+
+| 变量 | 说明 |
+|------|------|
+| `AUTH_TOKEN` | 后台管理员登录令牌（请设置强密码） |
+| `PROXY_TOKEN` | 下游客户端调用 `/v1/*` 时使用的 Bearer Token |
+| `TZ` | 服务时区，影响定时任务和日志（如 `Asia/Shanghai`） |
+| `PORT` | 内部监听端口（默认 `4000`，一般无需修改） |
+
+部署完成后，通过 Zeabur 分配的域名访问后台管理面板即可。
+
+---
+
 ## Docker Compose 部署（推荐）
 
 ### 标准步骤
