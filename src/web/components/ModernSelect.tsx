@@ -4,6 +4,8 @@ type ModernSelectOption = {
   label: string;
   description?: string;
   disabled?: boolean;
+  iconUrl?: string;
+  iconText?: string;
 };
 
 type ModernSelectProps = {
@@ -63,6 +65,16 @@ export default function ModernSelect({
     if (disabled) setOpen(false);
   }, [disabled]);
 
+  const renderOptionIcon = (item: ModernSelectOption) => {
+    if (item.iconUrl) {
+      return <img className="modern-select-option-icon" src={item.iconUrl} alt="" loading="lazy" />;
+    }
+    if (item.iconText) {
+      return <span className="modern-select-option-icon-text">{item.iconText}</span>;
+    }
+    return null;
+  };
+
   return (
     <div
       ref={rootRef}
@@ -78,7 +90,14 @@ export default function ModernSelect({
         disabled={disabled}
       >
         <span className={`modern-select-value ${selected ? '' : 'is-placeholder'}`.trim()}>
-          {selected?.label || placeholder}
+          {selected ? (
+            <span className="modern-select-value-content">
+              {renderOptionIcon(selected)}
+              <span>{selected.label}</span>
+            </span>
+          ) : (
+            placeholder
+          )}
         </span>
         <svg
           className="modern-select-chevron"
@@ -110,11 +129,14 @@ export default function ModernSelect({
                 }}
                 disabled={item.disabled}
               >
-                <div style={{ minWidth: 0 }}>
-                  <div className="modern-select-option-label">{item.label}</div>
-                  {item.description && (
-                    <div className="modern-select-option-desc">{item.description}</div>
-                  )}
+                <div className="modern-select-option-main">
+                  {renderOptionIcon(item)}
+                  <div style={{ minWidth: 0 }}>
+                    <div className="modern-select-option-label">{item.label}</div>
+                    {item.description && (
+                      <div className="modern-select-option-desc">{item.description}</div>
+                    )}
+                  </div>
                 </div>
                 {active && (
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">

@@ -502,6 +502,50 @@ body {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.topbar-search-trigger {
+  height: 36px;
+  min-width: 170px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 12px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.topbar-search-trigger:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary) 7%, var(--color-bg-card));
+  color: var(--color-text-primary);
+}
+
+.topbar-search-trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.topbar-search-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+}
+
+.topbar-search-kbd {
+  margin-left: auto;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
 .topbar-badge {
   position: absolute;
   top: 2px;
@@ -1091,6 +1135,38 @@ body {
   background: rgba(99, 102, 241, 0.06);
 }
 
+@keyframes row-focus-glow {
+  0% {
+    background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-primary) 70%, transparent);
+  }
+  100% {
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+.data-table tbody tr.row-focus-highlight {
+  animation: row-focus-glow 2.2s ease;
+}
+
+@keyframes rebind-panel-glow {
+  0% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 42%, transparent);
+    border-color: color-mix(in srgb, var(--color-primary) 42%, var(--color-border));
+    background: color-mix(in srgb, var(--color-primary) 6%, var(--color-bg-card));
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    border-color: var(--color-border-light);
+    background: var(--color-bg-card);
+  }
+}
+
+.rebind-panel-highlight {
+  animation: rebind-panel-glow 2.2s ease;
+}
+
 .program-logs-table {
   table-layout: fixed;
   min-width: 1120px;
@@ -1621,6 +1697,14 @@ textarea {
   white-space: nowrap;
 }
 
+.modern-select-value-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .modern-select-value.is-placeholder {
   color: var(--color-text-muted);
 }
@@ -1689,6 +1773,33 @@ textarea {
   text-align: left;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+
+.modern-select-option-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.modern-select-option-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.modern-select-option-icon-text {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .modern-select.is-sm .modern-select-option {
@@ -1962,6 +2073,14 @@ textarea {
 
 .search-result-item:hover {
   background: var(--color-primary-light);
+}
+
+.notification-event-item {
+  transition: background-color 0.16s ease;
+}
+
+.notification-event-item:hover {
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
 }
 
 /* ===== Chart Panel Entrance Animation ===== */
@@ -2731,6 +2850,10 @@ textarea {
 }
 
 @media (max-width: 1280px) {
+  .topbar-search-trigger {
+    min-width: 154px;
+  }
+
   .accounts-page-actions {
     gap: 6px;
   }
@@ -2774,6 +2897,21 @@ textarea {
 
 /* ===== Responsive Adjustments ===== */
 @media (max-width: 900px) {
+  .topbar-search-trigger {
+    min-width: 0;
+    padding: 0 8px;
+    gap: 6px;
+  }
+
+  .topbar-search-label {
+    display: none;
+  }
+
+  .topbar-search-kbd {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+
   .accounts-page-actions {
     width: 100%;
     justify-content: stretch;
@@ -2834,5 +2972,11 @@ textarea {
   .monitor-iframe {
     height: calc(100vh - 320px);
     min-height: 460px;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar-search-kbd {
+    display: none;
   }
 }

@@ -5,7 +5,7 @@ import { refreshBalance } from '../../services/balanceService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability } from '../../services/modelService.js';
 import { ensureDefaultTokenForAccount, syncTokensFromUpstream } from '../../services/accountTokenService.js';
-import { guessPlatformUserIdFromUsername, mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
+import { guessPlatformUserIdFromUsername, mergeAccountExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { encryptAccountPassword } from '../../services/accountCredentialService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
@@ -16,6 +16,8 @@ import {
   setAccountRuntimeHealth,
   type RuntimeHealthState,
 } from '../../services/accountHealthService.js';
+import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
+import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -318,7 +320,15 @@ export async function accountsRoutes(app: FastifyInstance) {
     const adapter = getAdapter(site.platform);
     if (!adapter) return { success: false, message: `婵炴垶鎸哥粔鐢稿极椤曗偓楠炴劖鎷呴悜妯兼殸濡ょ姷鍋涢崯鑳亹? ${site.platform}` };
 
-    const result = await adapter.verifyToken(site.url, accessToken, platformUserId);
+    let result: any;
+    try {
+      result = await adapter.verifyToken(site.url, accessToken, platformUserId);
+    } catch (err: any) {
+      return {
+        success: false,
+        message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
+      };
+    }
 
     if (result.tokenType === 'session') {
       return {
@@ -384,7 +394,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
         for (const headers of headerVariants) {
           try {
-            const testRes = await fetch(`${site.url}/api/user/self`, { headers });
+            const testRes = await fetch(`${site.url}/api/user/self`, withExplicitProxyRequestInit(site.proxyUrl, { headers }));
             const bodyText = await testRes.text();
             const contentType = testRes.headers.get('content-type') || '';
             const reason = parseFailureReason(bodyText, contentType);
@@ -415,36 +425,156 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     return {
       success: false,
-      message: 'Token invalid: cannot use it as session token or API key',
+      message: 'Token invalid: cannot use it as session cookie or API key',
     };
   });
 
+  app.post<{ Params: { id: string }; Body: { accessToken: string; platformUserId?: number } }>(
+    '/api/accounts/:id/rebind-session',
+    async (request, reply) => {
+      const accountId = Number.parseInt(request.params.id, 10);
+      if (!Number.isFinite(accountId) || accountId <= 0) {
+        return reply.code(400).send({ success: false, message: '账号 ID 无效' });
+      }
+
+      const nextAccessToken = (request.body?.accessToken || '').trim();
+      if (!nextAccessToken) {
+        return reply.code(400).send({ success: false, message: '请提供新的 Session Token' });
+      }
+
+      const row = db.select()
+        .from(schema.accounts)
+        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .where(eq(schema.accounts.id, accountId))
+        .get();
+      if (!row) {
+        return reply.code(404).send({ success: false, message: '账号不存在' });
+      }
+
+      const account = row.accounts;
+      const site = row.sites;
+      const adapter = getAdapter(site.platform);
+      if (!adapter) {
+        return reply.code(400).send({ success: false, message: `platform not supported: ${site.platform}` });
+      }
+
+      const bodyPlatformUserId = Number.parseInt(String(request.body?.platformUserId ?? ''), 10);
+      const candidatePlatformUserId = Number.isFinite(bodyPlatformUserId) && bodyPlatformUserId > 0
+        ? bodyPlatformUserId
+        : resolvePlatformUserId(account.extraConfig, account.username);
+
+      let verifyResult: any;
+      try {
+        verifyResult = await adapter.verifyToken(site.url, nextAccessToken, candidatePlatformUserId);
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
+        });
+      }
+
+      if (verifyResult?.tokenType !== 'session') {
+        return reply.code(400).send({
+          success: false,
+          message: '新的 Token 验证失败：请提供可用的 Session Token',
+        });
+      }
+
+      const nextUsernameRaw = typeof verifyResult?.userInfo?.username === 'string'
+        ? verifyResult.userInfo.username.trim()
+        : '';
+      const nextUsername = nextUsernameRaw || account.username || '';
+      const inferredPlatformUserId = resolvePlatformUserId(account.extraConfig, nextUsername);
+      const resolvedPlatformUserId = Number.isFinite(bodyPlatformUserId) && bodyPlatformUserId > 0
+        ? bodyPlatformUserId
+        : inferredPlatformUserId;
+      const nextApiToken = typeof verifyResult?.apiToken === 'string' && verifyResult.apiToken.trim().length > 0
+        ? verifyResult.apiToken.trim()
+        : (account.apiToken || '');
+
+      const updates: Record<string, unknown> = {
+        accessToken: nextAccessToken,
+        status: 'active',
+        updatedAt: new Date().toISOString(),
+      };
+      if (nextUsername) {
+        updates.username = nextUsername;
+      }
+      if (nextApiToken) {
+        updates.apiToken = nextApiToken;
+      }
+      if (resolvedPlatformUserId) {
+        updates.extraConfig = mergeAccountExtraConfig(account.extraConfig, { platformUserId: resolvedPlatformUserId });
+      }
+
+      db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, accountId)).run();
+
+      if (nextApiToken) {
+        try {
+          ensureDefaultTokenForAccount(accountId, nextApiToken, { name: 'default', source: 'sync' });
+        } catch {}
+      }
+
+      try {
+        await refreshBalance(accountId);
+      } catch {}
+      try {
+        await refreshModelsForAccount(accountId);
+        rebuildTokenRoutesFromAvailability();
+      } catch {}
+
+      const latest = db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
+      return {
+        success: true,
+        account: latest,
+        apiTokenFound: !!nextApiToken,
+      };
+    },
+  );
+
   // Add an account (manual token input) - auto-detects token type and fetches info
-  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean } }>('/api/accounts', async (request) => {
+  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean } }>('/api/accounts', async (request, reply) => {
     const body = request.body;
     const site = db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
+    if (!site) {
+      return reply.code(400).send({ success: false, message: 'site not found' });
+    }
+
+    const adapter = getAdapter(site.platform);
+    if (!adapter) {
+      return reply.code(400).send({ success: false, message: `platform not supported: ${site.platform}` });
+    }
 
     let username = body.username;
     let accessToken = body.accessToken;
     let apiToken = body.apiToken;
-    let tokenType = 'unknown';
+    let verifyResult: any;
+    try {
+      verifyResult = await adapter.verifyToken(site.url, body.accessToken, body.platformUserId);
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
+      });
+    }
+    const tokenType = verifyResult.tokenType;
 
-    if (site) {
-      const adapter = getAdapter(site.platform);
-      if (adapter) {
-        const verifyResult = await adapter.verifyToken(site.url, body.accessToken, body.platformUserId);
-        tokenType = verifyResult.tokenType;
+    if (tokenType === 'unknown') {
+      return reply.code(400).send({
+        success: false,
+        requiresVerification: true,
+        message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
+      });
+    }
 
-        if (verifyResult.tokenType === 'session') {
-          // Token is a session token - can do management ops
-          if (!username && verifyResult.userInfo?.username) username = verifyResult.userInfo.username;
-          if (!apiToken && verifyResult.apiToken) apiToken = verifyResult.apiToken;
-        } else if (verifyResult.tokenType === 'apikey') {
-          // Token is an API key - store as apiToken, not accessToken
-          apiToken = body.accessToken;
-          accessToken = ''; // no session token available
-        }
-      }
+    if (tokenType === 'session') {
+      // Token is a session cookie - can do management ops
+      if (!username && verifyResult.userInfo?.username) username = verifyResult.userInfo.username;
+      if (!apiToken && verifyResult.apiToken) apiToken = verifyResult.apiToken;
+    } else if (tokenType === 'apikey') {
+      // Token is an API key - store as apiToken, not accessToken
+      apiToken = body.accessToken;
+      accessToken = ''; // no session cookie available
     }
 
     // Store platformUserId in extraConfig for NewAPI sites that need it
@@ -472,14 +602,11 @@ export async function accountsRoutes(app: FastifyInstance) {
       } catch { }
     }
 
-    if (tokenType === 'session' && accessToken && site) {
+    if (tokenType === 'session' && accessToken) {
       try {
-        const adapter = getAdapter(site.platform);
-        if (adapter) {
-          const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
-          if (syncedTokens.length > 0) {
-            syncTokensFromUpstream(result.id, syncedTokens);
-          }
+        const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
+        if (syncedTokens.length > 0) {
+          syncTokensFromUpstream(result.id, syncedTokens);
         }
       } catch { }
     }

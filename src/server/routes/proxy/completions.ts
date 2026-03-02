@@ -9,6 +9,8 @@ import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
+import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
+import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 
 const MAX_RETRIES = 2;
 
@@ -19,6 +21,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     if (!requestedModel) {
       return reply.code(400).send({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
+    if (!ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
 
     const isStream = body.stream === true;
     const excludeChannelIds: number[] = [];
@@ -26,12 +30,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? tokenRouter.selectChannel(requestedModel)
-        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds);
+        ? tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = tokenRouter.selectChannel(requestedModel);
+        selected = tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -51,14 +55,14 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, {
+        const upstream = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${selected.tokenValue}`,
           },
           body: JSON.stringify(forwardBody),
-        });
+        }));
 
         if (!upstream.ok) {
           const errText = await upstream.text().catch(() => 'unknown error');
@@ -159,6 +163,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             estimatedCost = resolvedUsage.estimatedCostFromQuota;
           }
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+          recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected, requestedModel, 'success', 200, latency, null, retryCount,
             resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost,
@@ -197,6 +202,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         }
 
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected, requestedModel, 'success', 200, latency, null, retryCount,
           resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost,

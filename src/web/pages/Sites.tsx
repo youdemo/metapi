@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
+import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import {
@@ -20,6 +22,7 @@ type SiteRow = {
   platform?: string;
   status?: string;
   apiKey?: string;
+  proxyUrl?: string | null;
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
@@ -33,11 +36,18 @@ const platformColors: Record<string, string> = {
   'one-hub': 'badge-muted',
   'done-hub': 'badge-muted',
   sub2api: 'badge-muted',
+  openai: 'badge-success',
+  claude: 'badge-warning',
+  gemini: 'badge-info',
 };
 
 export default function Sites() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [sites, setSites] = useState<SiteRow[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [highlightSiteId, setHighlightSiteId] = useState<number | null>(null);
   const [editor, setEditor] = useState<SiteEditorState | null>(null);
   const [form, setForm] = useState<SiteForm>(emptySiteForm());
   const [detecting, setDetecting] = useState(false);
@@ -46,6 +56,8 @@ export default function Sites() {
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
+  const highlightTimerRef = useRef<number | null>(null);
   const toast = useToast();
 
   const isEditing = editor?.mode === 'edit';
@@ -57,6 +69,8 @@ export default function Sites() {
       setSites(rows || []);
     } catch {
       toast.error('加载站点列表失败');
+    } finally {
+      setLoaded(true);
     }
   };
 
@@ -68,6 +82,35 @@ export default function Sites() {
     () => sortItemsForDisplay(sites, sortMode, (site) => site.totalBalance || 0),
     [sites, sortMode],
   );
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const focusSiteId = readFocusSiteId(location.search);
+    if (!focusSiteId || !loaded) return;
+
+    const row = rowRefs.current.get(focusSiteId);
+    const cleanedSearch = clearFocusParams(location.search);
+    if (!row) {
+      navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+      return;
+    }
+
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightSiteId(focusSiteId);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightSiteId((current) => (current === focusSiteId ? null : current));
+    }, 2200);
+
+    navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+  }, [loaded, location.pathname, location.search, navigate, sortedSites]);
 
   const closeEditor = () => {
     setEditor(null);
@@ -95,6 +138,7 @@ export default function Sites() {
       url: form.url.trim(),
       platform: form.platform.trim(),
       apiKey: form.apiKey.trim(),
+      proxyUrl: form.proxyUrl.trim(),
     };
     if (!payload.name || !payload.url) {
       toast.error('请填写站点名称和 URL');
@@ -308,6 +352,21 @@ export default function Sites() {
                 color: 'var(--color-text-primary)',
               }}
             />
+            <input
+              placeholder="出站代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
+              value={form.proxyUrl}
+              onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+              style={{
+                width: '100%',
+                padding: '10px 14px',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: 13,
+                outline: 'none',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text-primary)',
+              }}
+            />
             <button
               onClick={handleSave}
               disabled={saving || !form.name.trim() || !form.url.trim()}
@@ -336,7 +395,14 @@ export default function Sites() {
             </thead>
             <tbody>
               {sortedSites.map((site, i) => (
-                <tr key={site.id} className={`animate-slide-up stagger-${Math.min(i + 1, 5)}`}>
+                <tr
+                  key={site.id}
+                  ref={(node) => {
+                    if (node) rowRefs.current.set(site.id, node);
+                    else rowRefs.current.delete(site.id);
+                  }}
+                  className={`animate-slide-up stagger-${Math.min(i + 1, 5)} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`}
+                >
                   <td style={{ fontWeight: 600 }}>
                     <a
                       href={site.url}

@@ -110,6 +110,8 @@ export const api = {
   addAccount: (data: any) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
   loginAccount: (data: { siteId: number; username: string; password: string }) => request('/api/accounts/login', { method: 'POST', body: JSON.stringify(data) }),
   verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number }) => request('/api/accounts/verify-token', { method: 'POST', body: JSON.stringify(data) }),
+  rebindAccountSession: (id: number, data: { accessToken: string; platformUserId?: number }) =>
+    request(`/api/accounts/${id}/rebind-session`, { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id: number, data: any) => request(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteAccount: (id: number) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
   refreshBalance: (id: number) => request(`/api/accounts/${id}/balance`, { method: 'POST' }),
@@ -160,6 +162,14 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ models }),
   }),
+  getRouteDecisionsByRouteBatch: (items: Array<{ routeId: number; model: string }>) => request('/api/routes/decision/by-route/batch', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+  }),
+  getRouteWideDecisionsBatch: (routeIds: number[]) => request('/api/routes/decision/route-wide/batch', {
+    method: 'POST',
+    body: JSON.stringify({ routeIds }),
+  }),
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
@@ -191,6 +201,21 @@ export const api = {
   updateRuntimeSettings: (data: any) => request('/api/settings/runtime', {
     method: 'PUT',
     body: JSON.stringify(data),
+  }),
+  getDownstreamApiKeys: () => request('/api/downstream-keys'),
+  createDownstreamApiKey: (data: any) => request('/api/downstream-keys', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  updateDownstreamApiKey: (id: number, data: any) => request(`/api/downstream-keys/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+  deleteDownstreamApiKey: (id: number) => request(`/api/downstream-keys/${id}`, {
+    method: 'DELETE',
+  }),
+  resetDownstreamApiKeyUsage: (id: number) => request(`/api/downstream-keys/${id}/reset-usage`, {
+    method: 'POST',
   }),
   exportBackup: (type: 'all' | 'accounts' | 'preferences' = 'all') =>
     request(`/api/settings/backup/export?type=${encodeURIComponent(type)}`),

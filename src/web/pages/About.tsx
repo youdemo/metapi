@@ -1,6 +1,6 @@
 import { tr } from '../i18n.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.2.0';
 
 const FEATURES = [
   { icon: '🌐', title: '统一代理网关', desc: '一个 Key、一个入口，兼容 OpenAI / Claude 下游格式' },

@@ -197,13 +197,17 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   const totalTokens = safeNumber(data?.proxy24h?.totalTokens);
 
   const latencyDot = (ms: number) => {
-    const color = ms < 200
+    const color = ms <= 500
       ? 'var(--color-success)'
-      : ms < 500
-        ? 'var(--color-warning)'
-        : ms < 1000
-          ? 'color-mix(in srgb, var(--color-warning) 78%, var(--color-danger))'
-          : 'var(--color-danger)';
+      : ms <= 1000
+        ? 'color-mix(in srgb, var(--color-success) 60%, var(--color-warning))'
+        : ms <= 1500
+          ? 'var(--color-warning)'
+          : ms <= 2000
+            ? 'color-mix(in srgb, var(--color-warning) 60%, var(--color-danger))'
+            : ms < 3000
+              ? 'color-mix(in srgb, var(--color-warning) 30%, var(--color-danger))'
+              : 'var(--color-danger)';
     return `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};box-shadow:0 0 4px ${color};animation:pulse 1.5s ease-in-out infinite;margin-right:3px;vertical-align:middle"></span><span style="color:${color};font-weight:600">${ms}ms</span>`;
   };
 

@@ -4,6 +4,8 @@ export function isCloudflareChallenge(message?: string | null): boolean {
   return text.includes('cloudflare') || text.includes('cf challenge') || text.includes('challenge required');
 }
 
+const SESSION_TOKEN_REBIND_HINT = '请在中转站重新生成系统访问令牌后重新绑定账号';
+
 export function isTokenExpiredError(input: { status?: number; message?: string | null }): boolean {
   if (input.status === 401 || input.status === 403) return true;
   const text = (input.message || '').toLowerCase();
@@ -26,4 +28,21 @@ export function isTokenExpiredError(input: { status?: number; message?: string |
     text.includes('unauthorized') ||
     text.includes('forbidden')
   );
+}
+
+export function appendSessionTokenRebindHint(message?: string | null): string {
+  const raw = String(message || '').trim();
+  if (!raw) return raw;
+  if (raw.includes(SESSION_TOKEN_REBIND_HINT)) return raw;
+
+  const text = raw.toLowerCase();
+  const looksLikeInvalidAccessToken = (
+    raw.includes('无权进行此操作，access token 无效') ||
+    /invalid\s+access\s+token/.test(text) ||
+    /access\s+token\s+is\s+invalid/.test(text) ||
+    /access\s+token.*无效/.test(raw)
+  );
+  if (!looksLikeInvalidAccessToken) return raw;
+
+  return `${raw}，${SESSION_TOKEN_REBIND_HINT}`;
 }

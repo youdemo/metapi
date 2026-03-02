@@ -77,6 +77,34 @@ describe('notifyService', () => {
     ).rejects.toThrow(/smtp auth failed|通知发送失败/);
   });
 
+  it('includes failed channel details when all enabled channels fail', async () => {
+    const { config } = await import('../config.js');
+    config.webhookEnabled = true;
+    config.webhookUrl = 'https://webhook.example.com/notify';
+    config.barkEnabled = true;
+    config.barkUrl = 'https://api.day.app/mock-key';
+    config.smtpEnabled = false;
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+      });
+
+    const { sendNotification } = await import('./notifyService.js');
+
+    await expect(
+      (sendNotification as any)('测试通知', 'message', 'info', {
+        bypassThrottle: true,
+        throwOnFailure: true,
+      }),
+    ).rejects.toThrow(/webhook|bark|Webhook 响应状态|Bark 响应状态/i);
+  });
+
   it('includes local time and utc time labels in smtp payload', async () => {
     sendMailMock.mockResolvedValue({ accepted: ['receiver@example.com'] });
     const { sendNotification } = await import('./notifyService.js');

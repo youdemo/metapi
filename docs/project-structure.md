@@ -10,23 +10,35 @@ metapi/
 ├── dist/                  # 构建产物（前后端）
 ├── docker/                # 容器相关文件
 │   ├── Dockerfile         # 多阶段构建（Alpine）
-│   └── docker-compose.yml # Docker Compose 编排
+│   ├── docker-compose.yml # Docker Compose 编排
+│   └── docker-compose.override.yml # 开发覆盖配置
 ├── docs/                  # 文档与资源
+│   ├── .vitepress/        # VitePress 文档站配置
+│   ├── community/         # 社区贡献规范
 │   ├── logos/             # Logo 素材
 │   │   └── drafts/        # Logo 草稿
-│   └── project-structure.md
+│   ├── screenshots/       # 界面截图
+│   └── *.md               # 各文档页面
 ├── drizzle/               # Drizzle ORM 迁移 SQL 与元数据
 ├── scripts/               # 项目脚本（按场景分组）
-│   └── dev/
-│       └── restart.bat    # Windows 开发环境快捷重启
+│   ├── dev/
+│   │   └── restart.bat    # Windows 开发环境快捷重启
+│   └── release/
+│       ├── start.sh       # Release 包启动脚本（Linux/macOS）
+│       └── start.bat      # Release 包启动脚本（Windows）
 ├── src/
 │   ├── server/            # Fastify 后端服务
 │   └── web/               # React 前端应用
+├── .github/workflows/     # CI/CD 工作流
+│   ├── ci.yml             # 测试与构建检查
+│   ├── release.yml        # 多平台 Release 包发布
+│   └── docs-pages.yml     # 文档站 GitHub Pages 部署
 ├── tmp/                   # 临时调试文件（已 gitignore）
 ├── package.json
 ├── tsconfig.json
 ├── tsconfig.server.json
 ├── vite.config.ts
+├── drizzle.config.ts
 └── README.md
 ```
 
@@ -48,8 +60,8 @@ src/server/
 │   │   ├── sites.ts       # 站点 CRUD
 │   │   ├── accounts.ts    # 账号管理
 │   │   ├── accountTokens.ts # Token 同步与管理
-│   │   ├── tokens.ts      # Token 批量操作
-│   │   ├── tokenRoutes.ts # 路由规则管理
+│   │   ├── tokens.ts      # Token 批量操作与路由规则管理
+│   │   ├── downstreamApiKeys.ts # 下游 API Key 管理
 │   │   ├── checkin.ts     # 签到触发与日志
 │   │   ├── stats.ts       # 仪表盘统计
 │   │   ├── search.ts      # 全局搜索
@@ -61,11 +73,14 @@ src/server/
 │   └── proxy/             # 代理路由
 │       ├── router.ts      # 代理路由注册
 │       ├── chat.ts        # Chat Completions & Claude Messages
+│       ├── responses.ts   # OpenAI Responses 端点
 │       ├── completions.ts # Legacy Completions
 │       ├── embeddings.ts  # 向量嵌入
 │       ├── images.ts      # 图像生成
 │       ├── models.ts      # 模型列表
-│       └── chatFormats.ts # OpenAI <-> Claude 格式转换
+│       ├── chatFormats.ts # OpenAI <-> Claude 格式转换
+│       ├── upstreamEndpoint.ts  # 上游端点处理与透传
+│       └── downstreamPolicy.ts  # 下游 API Key 策略校验
 └── services/
     ├── platforms/          # 平台适配器
     │   ├── base.ts         # 适配器接口定义
@@ -94,6 +109,9 @@ src/server/
     ├── accountCredentialService.ts # 凭证加密
     ├── accountHealthService.ts     # 健康状态管理
     ├── accountExtraConfig.ts       # 平台专属配置
+    ├── accountTokenService.ts      # Token 管理服务
+    ├── downstreamApiKeyService.ts  # 下游 API Key 服务
+    ├── downstreamPolicyTypes.ts    # 下游策略类型定义
     ├── proxyRetryPolicy.ts         # 重试策略
     ├── proxyUsageParser.ts         # Token 用量解析
     ├── proxyUsageFallbackService.ts # 余额兜底估算
@@ -116,14 +134,18 @@ src/web/
 ├── api.ts                 # 统一 API 请求客户端
 ├── authSession.ts         # 认证会话管理
 ├── i18n.tsx               # 国际化
+├── i18n.supplement.ts     # 国际化补充翻译
 ├── components/            # 通用 UI 组件
 │   ├── BrandIcon.tsx      # 模型品牌图标
+│   ├── ChangeKeyModal.tsx # 修改管理令牌弹窗
 │   ├── ModelAnalysisPanel.tsx # 消费分析图表
+│   ├── ModernSelect.tsx   # 自定义下拉选择组件
 │   ├── SearchModal.tsx    # 全局搜索弹窗
 │   ├── NotificationPanel.tsx # 实时事件面板
 │   ├── Toast.tsx          # 通知提示
-│   ├── SiteDistributionChart.tsx # 余额分布饼图
-│   └── SiteTrendChart.tsx # 消费趋势图
+│   └── charts/            # 图表组件
+│       ├── SiteDistributionChart.tsx # 余额分布饼图
+│       └── SiteTrendChart.tsx       # 消费趋势图
 ├── pages/                 # 页面组件（路由页）
 │   ├── Dashboard.tsx      # 仪表盘
 │   ├── Sites.tsx          # 站点管理
@@ -131,9 +153,14 @@ src/web/
 │   ├── Tokens.tsx         # Token 管理
 │   ├── TokenRoutes.tsx    # 路由规则
 │   ├── Models.tsx         # 模型广场
+│   ├── ModelTester.tsx    # 模型操练场
+│   ├── Monitors.tsx       # 可用性监控
 │   ├── CheckinLog.tsx     # 签到日志
 │   ├── ProxyLogs.tsx      # 代理日志
+│   ├── ProgramLogs.tsx    # 系统事件日志
+│   ├── ImportExport.tsx   # 数据导入导出
 │   ├── Settings.tsx       # 系统设置
+│   ├── NotificationSettings.tsx # 通知设置
 │   ├── About.tsx          # 关于页面
 │   └── helpers/           # 页面级纯逻辑 / 工具函数（含测试）
 └── public/                # 静态资源

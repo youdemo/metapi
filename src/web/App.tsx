@@ -550,8 +550,10 @@ function AppShell() {
           >
             {language === 'zh' ? 'EN' : '中'}
           </button>
-          <button className="topbar-icon-btn" title={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
+          <button className="topbar-search-trigger" title={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+            <span className="topbar-search-label">{t('搜索')}</span>
+            <kbd className="topbar-search-kbd">Ctrl K</kbd>
           </button>
           <div style={{ position: 'relative' }}>
             <button ref={notifBtnRef} className="topbar-icon-btn" title={t('通知')} onClick={() => setShowNotifications(!showNotifications)}>
@@ -723,4 +725,3 @@ export default function App() {
     </I18nProvider>
   );
 }
-

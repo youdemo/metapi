@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { formatDateLocal, formatDateTimeMinuteLocal } from '../pages/helpers/checkinLogTime.js';
+import { buildAccountFocusPath, buildSiteFocusPath } from '../pages/helpers/navigationFocus.js';
 import { useI18n } from '../i18n.js';
 
 interface SiteResult {
@@ -13,6 +14,7 @@ interface SiteResult {
 interface AccountResult {
   id: number;
   username: string | null;
+  status?: string | null;
   balance?: number | null;
   site?: { name: string } | null;
 }
@@ -165,7 +167,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('站点')}</div>
               {results.sites.map((s) => (
-                <button key={s.id} className="search-result-item" onClick={() => goTo('/sites')}>
+                <button key={s.id} className="search-result-item" onClick={() => goTo(buildSiteFocusPath(s.id))}>
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9" />
                   </svg>
@@ -182,7 +184,11 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('账号')}</div>
               {results.accounts.map((a) => (
-                <button key={a.id} className="search-result-item" onClick={() => goTo('/accounts')}>
+                <button
+                  key={a.id}
+                  className="search-result-item"
+                  onClick={() => goTo(buildAccountFocusPath(a.id, { openRebind: a.status === 'expired' }))}
+                >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                   </svg>

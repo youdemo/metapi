@@ -68,14 +68,17 @@ interface ModelsMarketplaceResponse {
   };
 }
 function getMetricColor(latency: number) {
-  if (latency > 3000) return 'var(--color-danger)';
-  if (latency > 1200) return 'var(--color-warning)';
+  if (latency >= 3000) return 'var(--color-danger)';
+  if (latency >= 2000) return 'color-mix(in srgb, var(--color-warning) 30%, var(--color-danger))';
+  if (latency >= 1500) return 'color-mix(in srgb, var(--color-warning) 60%, var(--color-danger))';
+  if (latency >= 1000) return 'var(--color-warning)';
+  if (latency > 500) return 'color-mix(in srgb, var(--color-success) 60%, var(--color-warning))';
   return 'var(--color-success)';
 }
 
 function getLatencyBadgeClass(latency: number) {
-  if (latency > 3000) return 'badge-error';
-  if (latency > 1200) return 'badge-warning';
+  if (latency >= 3000) return 'badge-error';
+  if (latency >= 1000) return 'badge-warning';
   return 'badge-success';
 }
 

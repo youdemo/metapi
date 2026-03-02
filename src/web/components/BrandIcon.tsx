@@ -102,13 +102,72 @@ const BRAND_MAP: Array<{ prefixes: string[]; brand: BrandInfo }> = [
     },
 ];
 
-export function getBrand(modelName: string): BrandInfo | null {
-    const lower = modelName.toLowerCase();
-    for (const entry of BRAND_MAP) {
-        for (const prefix of entry.prefixes) {
-            if (lower.startsWith(prefix)) return entry.brand;
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const BRAND_RULES = BRAND_MAP.map((entry) => ({
+    brand: entry.brand,
+    prefixMatchers: entry.prefixes.map((prefix) => ({
+        prefix,
+        boundaryRegex: new RegExp(`(^|[^a-z0-9])${escapeRegExp(prefix)}(?=$|[^a-z0-9])`),
+    })),
+}));
+
+function collectBrandCandidates(modelName: string): string[] {
+    const queue: string[] = [];
+    const seen = new Set<string>();
+    const push = (value: string) => {
+        const normalized = (value || '').trim().toLowerCase();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        queue.push(normalized);
+    };
+
+    push(modelName);
+    for (let i = 0; i < queue.length; i += 1) {
+        const candidate = queue[i];
+
+        // Strip common route/model wrappers, e.g. "[Summer] gpt-5.2".
+        push(candidate.replace(/^(?:\[[^\]]+\]|【[^】]+】)\s*/g, ''));
+
+        if (candidate.startsWith('re:')) {
+            push(candidate.slice(3).trim());
+        }
+        push(candidate.replace(/^\^+/, '').replace(/\$+$/, ''));
+
+        if (candidate.includes('/')) {
+            for (const part of candidate.split('/')) push(part);
+        }
+        if (candidate.includes(':')) {
+            for (const part of candidate.split(':')) push(part);
         }
     }
+
+    return queue;
+}
+
+export function getBrand(modelName: string): BrandInfo | null {
+    const candidates = collectBrandCandidates(modelName);
+
+    // Prefer strict prefix matching first for predictable behavior.
+    for (const candidate of candidates) {
+        for (const rule of BRAND_RULES) {
+            for (const matcher of rule.prefixMatchers) {
+                if (candidate.startsWith(matcher.prefix)) return rule.brand;
+            }
+        }
+    }
+
+    // Fallback for regex/model wrappers where brand token appears inside the pattern.
+    for (const candidate of candidates) {
+        for (const rule of BRAND_RULES) {
+            for (const matcher of rule.prefixMatchers) {
+                if (matcher.boundaryRegex.test(candidate)) return rule.brand;
+            }
+        }
+    }
+
     return null;
 }
 

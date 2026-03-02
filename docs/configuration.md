@@ -78,6 +78,28 @@ Metapi 的路由引擎按多因子加权选择最优通道。
 
 示例：`ADMIN_IP_ALLOWLIST=192.168.1.0/24,10.0.0.1`
 
+## 下游 API Key 策略
+
+除了全局 `PROXY_TOKEN`，Metapi 支持在管理后台「设置 → 下游 API Key」中创建多个项目级下游 Key。
+
+每个 Key 可独立配置以下约束：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `name` | Key 名称（仅供标识） | `team-backend` |
+| `expiresAt` | 过期时间 | `2026-12-31T23:59:59Z` |
+| `maxCost` | 累计费用上限 | `100`（超限后拒绝请求） |
+| `maxRequests` | 累计请求数上限 | `10000` |
+| `supportedModels` | 模型白名单（JSON 数组） | `["gpt-4o", "claude-*", "re:deepseek.*"]` |
+| `allowedRouteIds` | 可走的路由 ID 白名单 | `[1, 3, 5]` |
+| `siteWeightMultipliers` | 站点权重倍率 | `{"1": 2.0, "3": 0.5}` |
+
+模型白名单支持三种匹配模式：
+
+- **精确匹配**：`gpt-4o`
+- **通配符**：`claude-*`（glob 风格）
+- **正则表达式**：`re:deepseek.*`（`re:` 前缀）
+
 ## 通知渠道
 
 ### Webhook

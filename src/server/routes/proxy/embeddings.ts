@@ -9,6 +9,8 @@ import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
+import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
+import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 
 const MAX_RETRIES = 2;
 
@@ -19,18 +21,20 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
     if (!requestedModel) {
       return reply.code(400).send({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
+    if (!ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
 
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? tokenRouter.selectChannel(requestedModel)
-        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds);
+        ? tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = tokenRouter.selectChannel(requestedModel);
+        selected = tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -48,14 +52,14 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, {
+        const upstream = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${selected.tokenValue}`,
           },
           body: JSON.stringify(forwardBody),
-        });
+        }));
 
         const text = await upstream.text();
         if (!upstream.ok) {
@@ -115,6 +119,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
         }
 
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected, requestedModel, 'success', upstream.status, latency, null, retryCount,
           resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost,

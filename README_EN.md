@@ -36,7 +36,7 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 </p>
 
 <p align="center">
-  <a href="docs/README.md"><strong>Docs</strong></a> ·
+  <a href="docs/index.md"><strong>Docs</strong></a> ·
   <a href="docs/getting-started.md">Quick Start</a> ·
   <a href="docs/deployment.md">Deployment</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
@@ -52,7 +52,7 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 
 The AI ecosystem is seeing a growing number of aggregation relay stations based on New API / One API and similar projects. Managing balances, model lists, and API keys across multiple sites is scattered and time-consuming.
 
-Metapi acts as an aggregation layer on top of these relay stations, unifying multiple sites into **one API Key, one endpoint**. Currently supported upstream platforms:
+**Metapi** acts as the **Meta-Aggregation Layer** on top of these relay stations, unifying multiple sites into **one endpoint (with configurable per-project downstream API Keys)** — all downstream tools (Cursor, Claude Code, Codex, Open WebUI, etc.) can seamlessly access all models. Currently supported upstream platforms:
 
 - [New API](https://github.com/QuantumNous/new-api)
 - [One API](https://github.com/songquanpeng/one-api)
@@ -64,7 +64,7 @@ Metapi acts as an aggregation layer on top of these relay stations, unifying mul
 
 | Pain Point | How Metapi Solves It |
 | --- | --- |
-| One key per site, tedious client config | **One key, unified proxy** — all site models auto-aggregated under `/v1/*` |
+| One key per site, tedious client config | **Unified proxy endpoint + optional per-project downstream keys** — all site models auto-aggregated under `/v1/*` |
 | No idea which site offers the cheapest model | **Smart routing** auto-selects the optimal channel by cost, balance, and usage |
 | Site goes down, manual switching is a hassle | **Auto-failover** — failed channels cool down and traffic shifts automatically |
 | Balances scattered everywhere | **Centralized dashboard** — at-a-glance overview with low-balance alerts |
@@ -79,24 +79,79 @@ Metapi acts as an aggregation layer on top of these relay stations, unifying mul
   <tr>
     <td align="center">
       <img src="docs/screenshots/dashboard.png" alt="dashboard" style="width:100%;height:auto;"/>
-      <div>Dashboard</div>
+      <div><b>Dashboard</b> — Balance distribution, spending trends, system overview</div>
     </td>
     <td align="center">
       <img src="docs/screenshots/model-marketplace.png" alt="model-marketplace" style="width:100%;height:auto;"/>
-      <div>Model Marketplace</div>
+      <div><b>Model Marketplace</b> — Cross-site model coverage, pricing comparison, measured metrics</div>
     </td>
   </tr>
   <tr>
     <td align="center">
       <img src="docs/screenshots/routes.png" alt="routes" style="width:100%;height:auto;"/>
-      <div>Smart Routing</div>
+      <div><b>Smart Routing</b> — Multi-channel probability distribution, cost-priority routing</div>
     </td>
     <td align="center">
       <img src="docs/screenshots/accounts.png" alt="accounts" style="width:100%;height:auto;"/>
-      <div>Account Management</div>
+      <div><b>Account Management</b> — Multi-site multi-account, health state tracking</div>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/sites.png" alt="sites" style="width:100%;height:auto;"/>
+      <div><b>Site Management</b> — Upstream site configuration and status overview</div>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/tokens.png" alt="tokens" style="width:100%;height:auto;"/>
+      <div><b>Token Management</b> — API Token lifecycle management</div>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/playground.png" alt="playground" style="width:100%;height:auto;"/>
+      <div><b>Model Playground</b> — Interactive online model testing</div>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/checkin.png" alt="checkin" style="width:100%;height:auto;"/>
+      <div><b>Check-in Log</b> — Auto check-in status and reward tracking</div>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/proxy-logs.png" alt="proxy-logs" style="width:100%;height:auto;"/>
+      <div><b>Usage Logs</b> — Proxy request logs and cost breakdown</div>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/monitor.png" alt="monitor" style="width:100%;height:auto;"/>
+      <div><b>Availability Monitor</b> — Channel health real-time monitoring</div>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/settings.png" alt="settings" style="width:100%;height:auto;"/>
+      <div><b>System Settings</b> — Global parameters and security configuration</div>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/notification-settings.png" alt="notification-settings" style="width:100%;height:auto;"/>
+      <div><b>Notification Settings</b> — Multi-channel alert and push configuration</div>
     </td>
   </tr>
 </table>
+
+---
+
+## Architecture Overview
+
+**Downstream Clients** (Cursor · Claude Code · Codex · Open WebUI · Cherry Studio, etc.)
+&emsp;↓ &ensp;`Authorization: Bearer <PROXY_TOKEN>`
+**Metapi Gateway**
+&emsp;• Unified Proxy `/v1/*` — compatible with all OpenAI / Claude endpoints
+&emsp;• Smart Routing Engine — weighted selection by cost, balance, and availability; auto-cooldown & retry on failure
+&emsp;• Model Discovery — auto-aggregates all upstream models with zero config
+&emsp;• Format Conversion — transparent bidirectional OpenAI ⇄ Claude conversion
+&emsp;• Auto Check-in · Balance Management · Alerts & Notifications · Data Dashboard
+&emsp;↓
+**Upstream Platforms** (New API · One API · OneHub · DoneHub · Veloera · AnyRouter · Sub2API …)
 
 ---
 
@@ -116,6 +171,11 @@ Metapi acts as an aggregation layer on top of these relay stations, unifying mul
 - Failed channels auto-cool down (default 10-minute cooldown)
 - Auto-retry on failure with automatic channel switching
 - Routing decisions are visually explainable — every choice is transparent and auditable
+
+<div align="center">
+  <img src="docs/screenshots/routes.png" alt="smart-routing-detail" width="700"/>
+  <p><sub>Smart Routing UI — supports exact match, wildcards, probability distribution, and more routing strategies</sub></p>
+</div>
 
 ### Multi-Platform Aggregation
 
@@ -145,6 +205,11 @@ Each adapter supports: account login, balance queries, model enumeration, token 
 - Latency, success rate, and other measured metrics
 - Upstream model catalog caching with brand classification (OpenAI, Anthropic, Google, DeepSeek, etc.)
 - Interactive model tester for online verification
+
+<div align="center">
+  <img src="docs/screenshots/model-marketplace.png" alt="model-marketplace-detail" width="700"/>
+  <p><sub>Model Marketplace — browse all available models' coverage, pricing, and performance metrics in one place</sub></p>
+</div>
 
 ### Auto Check-in
 
@@ -179,6 +244,22 @@ Alert scenarios: low balance warning, site/account anomalies, check-in failures,
 - Site balance pie chart, daily spending trend graphs
 - Global search (sites, accounts, models)
 - System event logs, proxy request logs (model, status, latency, token usage, cost estimation)
+
+<div align="center">
+  <img src="docs/screenshots/dashboard.png" alt="dashboard-detail" width="700"/>
+  <p><sub>Data Dashboard — balance distribution, spending trends, system health at a glance</sub></p>
+</div>
+
+### Model Playground
+
+- Interactive chat testing to instantly verify model availability and response quality
+- Select any routed model to compare outputs across different channels
+- Streaming / non-streaming dual mode testing
+
+<div align="center">
+  <img src="docs/screenshots/playground.png" alt="playground-detail" width="700"/>
+  <p><sub>Model Playground — interactive online testing, verify model availability and response quality</sub></p>
+</div>
 
 ### Lightweight Deployment
 
@@ -299,8 +380,25 @@ For more deployment options, see [Deployment Guide](docs/deployment.md).
 
 ## Documentation
 
+> Docs site (VitePress) local preview:
+>
+> ```bash
+> npm run docs:dev
+> ```
+>
+> Docs site build:
+>
+> ```bash
+> npm run docs:build
+> ```
+>
+> GitHub Actions auto publish: each push to `main` runs `.github/workflows/docs-pages.yml` and deploys to GitHub Pages.
+> First-time setup in repository settings:
+> `Settings -> Pages -> Build and deployment -> Source: GitHub Actions`
+
 | Category | Link | Description |
 | --- | --- | --- |
+| Docs Home | [docs/index.md](docs/index.md) | Publishable docs portal with nav/sidebar/search |
 | Overview | [docs/README.md](docs/README.md) | Documentation index |
 | Quick Start | [docs/getting-started.md](docs/getting-started.md) | Get running in 10 minutes |
 | Deployment | [docs/deployment.md](docs/deployment.md) | Docker Compose, reverse proxy, upgrades |
@@ -308,6 +406,7 @@ For more deployment options, see [Deployment Guide](docs/deployment.md).
 | Client Integration | [docs/client-integration.md](docs/client-integration.md) | Open WebUI / Cherry Studio / Cursor, etc. |
 | Operations | [docs/operations.md](docs/operations.md) | Backup, logging, health checks |
 | FAQ | [docs/faq.md](docs/faq.md) | Common errors and fixes |
+| FAQ/Tutorial Contribution | [docs/community/faq-tutorial-guidelines.md](docs/community/faq-tutorial-guidelines.md) | Templates and workflow for community knowledge |
 
 ---
 
@@ -394,6 +493,15 @@ Metapi exposes standard OpenAI / Claude compatible endpoints:
 | `/v1/models` | GET | List all available models |
 
 Include `Authorization: Bearer <PROXY_TOKEN>` in request headers.
+
+The global `PROXY_TOKEN` works by default.
+From `System Settings -> Downstream API Key Strategy` you can create multiple project-level downstream keys with individual configuration:
+
+- Expiration time (ExpireAt)
+- Cost and request limits (MaxCost / MaxRequests)
+- Model allowlist (SupportedModels, supports exact/glob/re:regex)
+- Route allowlist (AllowedRouteIds)
+- Site weight multipliers (SiteWeightMultipliers, control per-project upstream preference ratios)
 
 ---
 
@@ -582,7 +690,7 @@ If you discover a security issue, please refer to [SECURITY.md](SECURITY.md) and
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=cita-777/metapi&type=date&legend=top-left&v=1)](https://www.star-history.com/#cita-777/metapi&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=cita-777/metapi&type=date&legend=top-left&v=2)](https://www.star-history.com/#cita-777/metapi&type=date&legend=top-left)
 ---
 
 <div align="center">

@@ -2,6 +2,7 @@ import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
+import { appendSessionTokenRebindHint } from './alertRules.js';
 
 export async function reportTokenExpired(params: {
   accountId: number;
@@ -11,7 +12,8 @@ export async function reportTokenExpired(params: {
 }) {
   const accountLabel = params.username || `ID:${params.accountId}`;
   const siteLabel = params.siteName || 'unknown-site';
-  const detail = params.detail ? ` (${params.detail})` : '';
+  const detailText = params.detail ? appendSessionTokenRebindHint(params.detail) : '';
+  const detail = detailText ? ` (${detailText})` : '';
 
   db.insert(schema.events).values({
     type: 'token',
@@ -29,7 +31,7 @@ export async function reportTokenExpired(params: {
 
   setAccountRuntimeHealth(params.accountId, {
     state: 'unhealthy',
-    reason: params.detail ? `访问令牌失效：${params.detail}` : '访问令牌失效',
+    reason: detailText ? `访问令牌失效：${detailText}` : '访问令牌失效',
     source: 'auth',
   });
 

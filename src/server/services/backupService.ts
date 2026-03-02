@@ -160,6 +160,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         name: siteName,
         url: siteUrl,
         platform,
+        proxyUrl: null,
         status: 'active',
         isPinned: false,
         sortOrder: sites.length,

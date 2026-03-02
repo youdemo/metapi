@@ -55,6 +55,57 @@ docker run -d --name metapi \
 > - `./data:/app/data` — 相对路径，数据存到当前目录下的 `data` 文件夹
 > - 也可以使用绝对路径：`/your/custom/path:/app/data`
 
+## Release 包部署（免 Docker）
+
+适用于没有 Docker 环境的服务器，或 Windows / macOS 桌面使用场景。
+
+### 前置条件
+
+- Node.js 20+（推荐 22 LTS）
+
+### 步骤
+
+1. 从 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的压缩包（Linux / Windows / macOS）
+2. 解压后进入目录
+
+Linux / macOS：
+
+```bash
+export AUTH_TOKEN=your-admin-token
+export PROXY_TOKEN=your-proxy-sk-token
+export PORT=4000
+export DATA_DIR=./data
+./start.sh
+```
+
+Windows（PowerShell）：
+
+```powershell
+$env:AUTH_TOKEN="your-admin-token"
+$env:PROXY_TOKEN="your-proxy-sk-token"
+$env:PORT="4000"
+$env:DATA_DIR="./data"
+.\start.bat
+```
+
+`start.sh` / `start.bat` 的作用是：
+
+- 先检查 `better-sqlite3` 与当前 Node.js ABI 是否兼容
+- 若检测到 ABI 不匹配，会自动尝试 `npm rebuild better-sqlite3`
+- 若重建失败，会回退到 `npm ci --omit=dev` 重新安装运行时依赖
+- 最后执行数据库迁移并启动服务
+
+> [!NOTE]
+> 如果本机 Node 主版本与打包时不同（例如包内依赖基于 Node 22，而本机是 Node 24），首次启动可能触发自动重建，需联网。
+
+### Release 包升级
+
+1. 下载新版本的 Release 包
+2. 解压覆盖旧文件（`data/` 目录不受影响）
+3. 重新启动即可
+
+---
+
 ## 反向代理
 
 ### Nginx
@@ -150,6 +201,36 @@ Metapi 的所有运行数据存储在 SQLite 数据库中，位于 `DATA_DIR`（
 - 每日自动备份 `data/` 目录
 - 保留最近 7~30 天的备份
 - 重要操作前手动快照
+
+## 文档站部署
+
+Metapi 使用 [VitePress](https://vitepress.dev) 构建文档站，支持本地预览和 GitHub Pages 自动部署。
+
+### 本地预览
+
+```bash
+npm run docs:dev
+```
+
+访问 `http://localhost:4173` 查看文档站。
+
+### 构建静态站点
+
+```bash
+npm run docs:build
+```
+
+构建产物位于 `docs/.vitepress/dist/`，可部署到任意静态站点托管服务。
+
+### GitHub Pages 自动部署
+
+推送到 `main` 分支后，`.github/workflows/docs-pages.yml` 会自动构建并部署到 GitHub Pages。
+
+首次使用需在仓库设置中开启：
+
+`Settings → Pages → Build and deployment → Source: GitHub Actions`
+
+---
 
 ## 下一步
 

@@ -7,6 +7,8 @@ import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertSe
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
+import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 
 const MAX_RETRIES = 2;
 
@@ -14,17 +16,19 @@ export async function imagesProxyRoute(app: FastifyInstance) {
   app.post('/v1/images/generations', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body as any;
     const requestedModel = body?.model || 'gpt-image-1';
+    if (!ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? tokenRouter.selectChannel(requestedModel)
-        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds);
+        ? tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = tokenRouter.selectChannel(requestedModel);
+        selected = tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -44,14 +48,14 @@ export async function imagesProxyRoute(app: FastifyInstance) {
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, {
+        const upstream = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${selected.tokenValue}`,
           },
           body: JSON.stringify(forwardBody),
-        });
+        }));
 
         const text = await upstream.text();
         if (!upstream.ok) {
@@ -89,6 +93,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           totalTokens: 0,
         });
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        recordDownstreamCostUsage(request, estimatedCost);
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, estimatedCost);
         return reply.code(upstream.status).send(data);
       } catch (err: any) {

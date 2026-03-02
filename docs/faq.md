@@ -36,6 +36,15 @@ docker compose up -d
 
 或使用 `.env` 文件。
 
+### Q: Release 包启动失败
+
+**A:** 排查步骤：
+
+1. 确认 Node.js 已安装且版本 ≥ 20：`node --version`
+2. 首次启动时如果报 `better-sqlite3` 相关错误，启动脚本会尝试自动重建，需要网络连接
+3. 如果本机 Node 主版本与打包时不同（例如包内依赖基于 Node 22，而本机是 Node 24），首次启动需联网执行 `npm rebuild`
+4. Windows 用户确认使用 PowerShell 而非 CMD 运行 `start.bat`
+
 ---
 
 ## 代理相关
@@ -86,6 +95,23 @@ docker compose up -d
 
 ---
 
+## 下游 API Key 相关
+
+### Q: 如何限制不同项目/团队的用量
+
+**A:** 在管理后台 **设置 → 下游 API Key** 中为每个项目创建独立的 Key，可单独配置：
+
+- 费用上限（MaxCost）和请求上限（MaxRequests）
+- 模型白名单（限制可用模型，支持通配符和正则）
+- 路由白名单（限制可走的路由规则）
+- 站点倍率（控制不同项目的上游偏好）
+
+### Q: 下游 Key 和 PROXY_TOKEN 有什么区别
+
+**A:** `PROXY_TOKEN` 是全局代理令牌，拥有完整权限。下游 Key 是项目级的细粒度控制，可设置过期时间、用量上限和模型限制，适合多团队共用的场景。
+
+---
+
 ## 签到相关
 
 ### Q: 签到一直失败
@@ -128,5 +154,9 @@ docker compose up -d
 
 ## 更多帮助
 
-- [提交 Issue](https://github.com/cita-777/metapi/issues) — 报告 Bug 或提出建议
+如果以上内容未能解决你的问题：
+
+- [搜索已有 Issue](https://github.com/cita-777/metapi/issues?q=is%3Aissue) — 看看是否有人遇到过相同问题
+- [提交新 Issue](https://github.com/cita-777/metapi/issues/new) — 报告 Bug 或提出功能建议
+- [参与讨论](https://github.com/cita-777/metapi/discussions) — 使用疑问、经验分享
 - [文档中心](./README.md) — 查看所有文档

@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { and, eq } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
+import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -48,11 +49,15 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // Add a site
-  app.post<{ Body: { name: string; url: string; platform?: string; apiKey?: string; status?: string; isPinned?: boolean; sortOrder?: number } }>('/api/sites', async (request, reply) => {
-    const { name, url, platform, apiKey, status, isPinned, sortOrder } = request.body;
+  app.post<{ Body: { name: string; url: string; platform?: string; apiKey?: string; proxyUrl?: string | null; status?: string; isPinned?: boolean; sortOrder?: number } }>('/api/sites', async (request, reply) => {
+    const { name, url, platform, apiKey, proxyUrl, status, isPinned, sortOrder } = request.body;
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
+    }
+    const parsedProxyUrl = parseSiteProxyUrlInput(proxyUrl);
+    if (!parsedProxyUrl.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
     const normalizedPinned = normalizePinnedFlag(isPinned);
     if (isPinned !== undefined && normalizedPinned === null) {
@@ -79,15 +84,17 @@ export async function sitesRoutes(app: FastifyInstance) {
       url: url.replace(/\/+$/, ''),
       platform: detectedPlatform,
       apiKey,
+      proxyUrl: parsedProxyUrl.proxyUrl,
       status: normalizedStatus ?? 'active',
       isPinned: normalizedPinned ?? false,
       sortOrder: normalizedSortOrder ?? (maxSortOrder + 1),
     }).returning().get();
+    invalidateSiteProxyCache();
     return result;
   });
 
   // Update a site
-  app.put<{ Params: { id: string }; Body: { name?: string; url?: string; platform?: string; apiKey?: string; status?: string; isPinned?: boolean; sortOrder?: number } }>('/api/sites/:id', async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { name?: string; url?: string; platform?: string; apiKey?: string; proxyUrl?: string | null; status?: string; isPinned?: boolean; sortOrder?: number } }>('/api/sites/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
     if (Number.isNaN(id)) {
       return reply.code(400).send({ error: 'Invalid site id' });
@@ -104,6 +111,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
     }
+    const parsedProxyUrl = parseSiteProxyUrlInput(body.proxyUrl);
+    if (!parsedProxyUrl.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
+    }
     const normalizedPinned = normalizePinnedFlag(body.isPinned);
     if (body.isPinned !== undefined && normalizedPinned === null) {
       return reply.code(400).send({ error: 'Invalid isPinned value. Expected boolean.' });
@@ -117,11 +128,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.url !== undefined) updates.url = body.url.replace(/\/+$/, '');
     if (body.platform !== undefined) updates.platform = body.platform;
     if (body.apiKey !== undefined) updates.apiKey = body.apiKey;
+    if (parsedProxyUrl.present) updates.proxyUrl = parsedProxyUrl.proxyUrl;
     if (body.status !== undefined) updates.status = normalizedStatus;
     if (body.isPinned !== undefined) updates.isPinned = normalizedPinned;
     if (body.sortOrder !== undefined) updates.sortOrder = normalizedSortOrder;
     updates.updatedAt = new Date().toISOString();
     db.update(schema.sites).set(updates).where(eq(schema.sites.id, id)).run();
+    invalidateSiteProxyCache();
 
     if (body.status !== undefined && normalizedStatus) {
       const now = new Date().toISOString();
@@ -167,6 +180,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
     const id = parseInt(request.params.id);
     db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+    invalidateSiteProxyCache();
     return { success: true };
   });
 

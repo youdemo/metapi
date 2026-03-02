@@ -96,6 +96,17 @@ function toStringList(value: unknown): string[] {
   return [];
 }
 
+function isValidHttpUrl(raw: string): boolean {
+  const value = String(raw || '').trim();
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function applyImportedSettingToRuntime(key: string, value: unknown) {
   switch (key) {
     case 'checkin_cron': {
@@ -253,6 +264,38 @@ export async function settingsRoutes(app: FastifyInstance) {
     const body = request.body || {};
     const changedLabels: string[] = [];
     const currentRequestIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+
+    const webhookTouched = body.webhookUrl !== undefined || body.webhookEnabled !== undefined;
+    const nextWebhookUrl = body.webhookUrl !== undefined
+      ? String(body.webhookUrl || '').trim()
+      : config.webhookUrl;
+    const nextWebhookEnabled = body.webhookEnabled !== undefined
+      ? !!body.webhookEnabled
+      : config.webhookEnabled;
+    if (webhookTouched && nextWebhookEnabled) {
+      if (!nextWebhookUrl) {
+        return reply.code(400).send({ success: false, message: 'Webhook URL 不能为空（启用 Webhook 时）' });
+      }
+      if (!isValidHttpUrl(nextWebhookUrl)) {
+        return reply.code(400).send({ success: false, message: 'Webhook URL 无效，请填写 http/https 地址' });
+      }
+    }
+
+    const barkTouched = body.barkUrl !== undefined || body.barkEnabled !== undefined;
+    const nextBarkUrl = body.barkUrl !== undefined
+      ? String(body.barkUrl || '').trim()
+      : config.barkUrl;
+    const nextBarkEnabled = body.barkEnabled !== undefined
+      ? !!body.barkEnabled
+      : config.barkEnabled;
+    if (barkTouched && nextBarkEnabled) {
+      if (!nextBarkUrl) {
+        return reply.code(400).send({ success: false, message: 'Bark URL 不能为空（启用 Bark 时）' });
+      }
+      if (!isValidHttpUrl(nextBarkUrl)) {
+        return reply.code(400).send({ success: false, message: 'Bark URL 无效，请填写 http/https 地址' });
+      }
+    }
 
     if (body.checkinCron !== undefined) {
       if (!cron.validate(body.checkinCron)) {

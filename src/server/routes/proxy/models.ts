@@ -2,9 +2,13 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { and, eq } from 'drizzle-orm';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { getDownstreamRoutingPolicy } from './downstreamPolicy.js';
+import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 
 export async function modelsProxyRoute(app: FastifyInstance) {
   app.get('/v1/models', async (request) => {
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
+
     const readModels = () => {
       const rows = db.select({ modelName: schema.modelAvailability.modelName })
         .from(schema.modelAvailability)
@@ -18,7 +22,17 @@ export async function modelsProxyRoute(app: FastifyInstance) {
           ),
         )
         .all();
-      return Array.from(new Set(rows.map((r) => r.modelName))).sort();
+      const routeAliases = db.select({ displayName: schema.tokenRoutes.displayName })
+        .from(schema.tokenRoutes)
+        .where(eq(schema.tokenRoutes.enabled, true))
+        .all()
+        .map((row) => (row.displayName || '').trim())
+        .filter((name) => name.length > 0);
+      const deduped = Array.from(new Set([
+        ...rows.map((r) => r.modelName),
+        ...routeAliases,
+      ])).sort();
+      return deduped.filter((modelName) => isModelAllowedByPolicyOrAllowedRoutes(modelName, downstreamPolicy));
     };
 
     let models = readModels();

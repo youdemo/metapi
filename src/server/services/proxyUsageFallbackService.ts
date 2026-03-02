@@ -1,5 +1,6 @@
 import { fetch } from 'undici';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
+import { withExplicitProxyRequestInit } from './siteProxy.js';
 
 const SELF_LOG_FETCH_TIMEOUT_MS = 8_000;
 const SELF_LOG_PAGE_SIZE = 20;
@@ -23,6 +24,7 @@ interface ProxyUsageFallbackInput {
     url: string;
     platform: string;
     apiKey?: string | null;
+    proxyUrl?: string | null;
   };
   account: {
     accessToken?: string | null;
@@ -233,11 +235,11 @@ async function fetchSelfLogPayload(baseUrl: string, token: string, input: ProxyU
         headers['New-Api-User'] = String(userId);
       }
     }
-    const response = await fetch(`${baseUrl}/api/log/self?${query}`, {
+    const response = await fetch(`${baseUrl}/api/log/self?${query}`, withExplicitProxyRequestInit(input.site.proxyUrl, {
       method: 'GET',
       headers,
       signal: controller.signal,
-    });
+    }));
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);

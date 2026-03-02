@@ -1,0 +1,153 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+type DbModule = typeof import('../db/index.js');
+type TokenRouterModule = typeof import('./tokenRouter.js');
+
+describe('TokenRouter patterns and model mapping', () => {
+  let db: DbModule['db'];
+  let schema: DbModule['schema'];
+  let TokenRouter: TokenRouterModule['TokenRouter'];
+  let dataDir = '';
+  let idSeed = 0;
+
+  const nextId = () => {
+    idSeed += 1;
+    return idSeed;
+  };
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-token-router-patterns-'));
+    process.env.DATA_DIR = dataDir;
+
+    await import('../db/migrate.js');
+    const dbModule = await import('../db/index.js');
+    const tokenRouterModule = await import('./tokenRouter.js');
+    db = dbModule.db;
+    schema = dbModule.schema;
+    TokenRouter = tokenRouterModule.TokenRouter;
+  });
+
+  beforeEach(() => {
+    idSeed = 0;
+    db.delete(schema.routeChannels).run();
+    db.delete(schema.tokenRoutes).run();
+    db.delete(schema.accountTokens).run();
+    db.delete(schema.accounts).run();
+    db.delete(schema.sites).run();
+  });
+
+  afterAll(() => {
+    delete process.env.DATA_DIR;
+  });
+
+  function createSite(namePrefix: string) {
+    const id = nextId();
+    return db.insert(schema.sites).values({
+      name: `${namePrefix}-${id}`,
+      url: `https://${namePrefix}-${id}.example.com`,
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+  }
+
+  function createAccount(siteId: number, usernamePrefix: string) {
+    const id = nextId();
+    return db.insert(schema.accounts).values({
+      siteId,
+      username: `${usernamePrefix}-${id}`,
+      accessToken: `access-${id}`,
+      apiToken: `sk-${id}`,
+      status: 'active',
+    }).returning().get();
+  }
+
+  function createRouteWithSingleChannel(
+    modelPattern: string,
+    modelMapping?: string,
+    options?: { displayName?: string; sourceModel?: string | null },
+  ) {
+    const site = createSite('pattern-site');
+    const account = createAccount(site.id, 'pattern-user');
+    const route = db.insert(schema.tokenRoutes).values({
+      modelPattern,
+      displayName: options?.displayName,
+      modelMapping,
+      enabled: true,
+    }).returning().get();
+    const channel = db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      sourceModel: options?.sourceModel ?? null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    return { route, channel };
+  }
+
+  it('matches routes with re: regex patterns', () => {
+    createRouteWithSingleChannel('re:^claude-(opus|sonnet)-4-6$');
+    const router = new TokenRouter();
+
+    const matched = router.selectChannel('claude-opus-4-6');
+    const unmatched = router.selectChannel('claude-haiku-4-6');
+
+    expect(matched).toBeTruthy();
+    expect(matched?.actualModel).toBe('claude-opus-4-6');
+    expect(unmatched).toBeNull();
+  });
+
+  it('ignores invalid re: patterns and falls back to next matched route', () => {
+    const invalid = createRouteWithSingleChannel('re:([a-z');
+    const glob = createRouteWithSingleChannel('claude-*');
+    const router = new TokenRouter();
+
+    const selected = router.selectChannel('claude-opus-4-6');
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.id).toBe(glob.channel.id);
+    expect(selected?.channel.id).not.toBe(invalid.channel.id);
+  });
+
+  it('supports exact, glob and re: keys in modelMapping with exact taking precedence', () => {
+    const mapping = JSON.stringify({
+      'claude-sonnet-4-6': 'target-exact',
+      'claude-sonnet-*': 'target-glob',
+      're:^gpt-4o-mini-\\d+$': 'target-regex',
+    });
+    createRouteWithSingleChannel('*', mapping);
+    const router = new TokenRouter();
+
+    const exact = router.selectChannel('claude-sonnet-4-6');
+    const glob = router.selectChannel('claude-sonnet-4-7');
+    const regex = router.selectChannel('gpt-4o-mini-20250101');
+
+    expect(exact?.actualModel).toBe('target-exact');
+    expect(glob?.actualModel).toBe('target-glob');
+    expect(regex?.actualModel).toBe('target-regex');
+  });
+
+  it('matches a route by display name alias as an exposed model', () => {
+    createRouteWithSingleChannel(
+      're:^claude-(opus|sonnet)-4-5$',
+      undefined,
+      {
+        displayName: 'claude-opus-4-6',
+        sourceModel: 'claude-opus-4-5',
+      },
+    );
+    const router = new TokenRouter();
+
+    const selected = router.selectChannel('claude-opus-4-6');
+    const decision = router.explainSelection('claude-opus-4-6');
+    const exposedModels = router.getAvailableModels();
+
+    expect(selected).toBeTruthy();
+    expect(selected?.actualModel).toBe('claude-opus-4-5');
+    expect(decision.actualModel).toBe('claude-opus-4-5');
+    expect(exposedModels).toContain('claude-opus-4-6');
+  });
+});

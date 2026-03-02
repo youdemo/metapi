@@ -2,11 +2,14 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { rebuildTokenRoutesFromAvailability, refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
-import { tokenRouter } from '../../services/tokenRouter.js';
+import { matchesModelPattern, tokenRouter } from '../../services/tokenRouter.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 
 function isExactModelPattern(modelPattern: string): boolean {
-  return !/[\*\?\[]/.test(modelPattern);
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[\*\?\[]/.test(normalized);
 }
 
 function getDefaultTokenId(accountId: number): number | null {
@@ -16,17 +19,36 @@ function getDefaultTokenId(accountId: number): number | null {
   return token?.id ?? null;
 }
 
+function canonicalModelAlias(modelName: string): string {
+  const normalized = modelName.trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function isModelAliasEquivalent(left: string, right: string): boolean {
+  const a = canonicalModelAlias(left);
+  const b = canonicalModelAlias(right);
+  return !!a && !!b && a === b;
+}
+
 function tokenSupportsModel(tokenId: number, modelName: string): boolean {
-  const row = db.select().from(schema.tokenModelAvailability)
+  const rows = db.select().from(schema.tokenModelAvailability)
     .where(
       and(
         eq(schema.tokenModelAvailability.tokenId, tokenId),
-        eq(schema.tokenModelAvailability.modelName, modelName),
         eq(schema.tokenModelAvailability.available, true),
       ),
     )
-    .get();
-  return !!row;
+    .all();
+  return rows.some((row) => {
+    const availableModelName = row.modelName?.trim();
+    if (!availableModelName) return false;
+    return availableModelName === modelName || isModelAliasEquivalent(availableModelName, modelName);
+  });
 }
 
 function checkTokenBelongsToAccount(tokenId: number, accountId: number): boolean {
@@ -36,6 +58,117 @@ function checkTokenBelongsToAccount(tokenId: number, accountId: number): boolean
   return !!row;
 }
 
+function getPatternTokenCandidates(modelPattern: string): Array<{ tokenId: number; accountId: number; sourceModel: string }> {
+  const rows = db.select().from(schema.tokenModelAvailability)
+    .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
+    .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(
+      and(
+        eq(schema.tokenModelAvailability.available, true),
+        eq(schema.accountTokens.enabled, true),
+        eq(schema.accounts.status, 'active'),
+        eq(schema.sites.status, 'active'),
+      ),
+    )
+    .all();
+
+  const result: Array<{ tokenId: number; accountId: number; sourceModel: string }> = [];
+  for (const row of rows) {
+    const modelName = row.token_model_availability.modelName?.trim();
+    if (!modelName) continue;
+    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    result.push({
+      tokenId: row.account_tokens.id,
+      accountId: row.accounts.id,
+      sourceModel: modelName,
+    });
+  }
+
+  return result;
+}
+
+function getMatchedExactRouteChannelCandidates(modelPattern: string): Array<{
+  tokenId: number | null;
+  accountId: number;
+  sourceModel: string;
+  priority: number;
+  weight: number;
+  enabled: boolean;
+  manualOverride: boolean;
+}> {
+  const matchedRoutes = db.select().from(schema.tokenRoutes)
+    .where(eq(schema.tokenRoutes.enabled, true))
+    .all()
+    .filter((route) => isExactModelPattern(route.modelPattern) && matchesModelPattern(route.modelPattern, modelPattern));
+
+  if (matchedRoutes.length === 0) return [];
+  const routeMap = new Map<number, typeof matchedRoutes[number]>();
+  for (const route of matchedRoutes) routeMap.set(route.id, route);
+
+  const channels = db.select().from(schema.routeChannels)
+    .where(inArray(schema.routeChannels.routeId, matchedRoutes.map((route) => route.id)))
+    .all();
+
+  return channels.map((channel) => ({
+    tokenId: channel.tokenId ?? null,
+    accountId: channel.accountId,
+    sourceModel: (channel.sourceModel || routeMap.get(channel.routeId)?.modelPattern || '').trim(),
+    priority: channel.priority ?? 0,
+    weight: channel.weight ?? 10,
+    enabled: !!channel.enabled,
+    manualOverride: !!channel.manualOverride,
+  })).filter((candidate) => candidate.sourceModel.length > 0);
+}
+
+function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): number {
+  const routeCandidates = getMatchedExactRouteChannelCandidates(modelPattern);
+  const availabilityCandidates = getPatternTokenCandidates(modelPattern).map((candidate) => ({
+    tokenId: candidate.tokenId,
+    accountId: candidate.accountId,
+    sourceModel: candidate.sourceModel,
+    priority: 0,
+    weight: 10,
+    enabled: true,
+    manualOverride: false,
+  }));
+  const candidates = [...routeCandidates, ...availabilityCandidates];
+  if (candidates.length === 0) return 0;
+
+  const existingChannels = db.select().from(schema.routeChannels)
+    .where(eq(schema.routeChannels.routeId, routeId))
+    .all();
+  const existingPairs = new Set<string>(
+    existingChannels
+      .map((channel) => {
+        const tokenId = typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId) ? channel.tokenId : 0;
+        const sourceModel = (channel.sourceModel || '').trim().toLowerCase();
+        return `${channel.accountId}::${tokenId}::${sourceModel}`;
+      }),
+  );
+
+  let created = 0;
+  for (const candidate of candidates) {
+    const tokenId = typeof candidate.tokenId === 'number' && Number.isFinite(candidate.tokenId) ? candidate.tokenId : 0;
+    const pairKey = `${candidate.accountId}::${tokenId}::${candidate.sourceModel.trim().toLowerCase()}`;
+    if (existingPairs.has(pairKey)) continue;
+    db.insert(schema.routeChannels).values({
+      routeId,
+      accountId: candidate.accountId,
+      tokenId: candidate.tokenId,
+      sourceModel: candidate.sourceModel,
+      priority: candidate.priority,
+      weight: candidate.weight,
+      enabled: candidate.enabled,
+      manualOverride: candidate.manualOverride,
+    }).run();
+    existingPairs.add(pairKey);
+    created += 1;
+  }
+
+  return created;
+}
+
 type BatchChannelPriorityUpdate = {
   id: number;
   priority: number;
@@ -43,6 +176,17 @@ type BatchChannelPriorityUpdate = {
 
 type BatchRouteDecisionModels = {
   models: string[];
+};
+
+type BatchRouteDecisionRouteModels = {
+  items: Array<{
+    routeId: number;
+    model: string;
+  }>;
+};
+
+type BatchRouteWideDecisionRouteIds = {
+  routeIds: number[];
 };
 
 function parseBatchChannelUpdates(input: unknown): { ok: true; updates: BatchChannelPriorityUpdate[] } | { ok: false; message: string } {
@@ -112,6 +256,75 @@ function parseBatchRouteDecisionModels(input: unknown): { ok: true; models: stri
   return { ok: true, models: normalized };
 }
 
+function parseBatchRouteDecisionRouteModels(
+  input: unknown,
+): { ok: true; items: Array<{ routeId: number; model: string }> } | { ok: false; message: string } {
+  if (!input || typeof input !== 'object') {
+    return { ok: false, message: '请求体必须是对象' };
+  }
+
+  const items = (input as BatchRouteDecisionRouteModels).items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return { ok: false, message: 'items 必须是非空数组' };
+  }
+
+  const dedupe = new Set<string>();
+  const normalized: Array<{ routeId: number; model: string }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const routeIdRaw = (item as { routeId?: unknown }).routeId;
+    const modelRaw = (item as { model?: unknown }).model;
+    if (typeof routeIdRaw !== 'number' || !Number.isFinite(routeIdRaw)) continue;
+    if (typeof modelRaw !== 'string') continue;
+
+    const routeId = Math.trunc(routeIdRaw);
+    const model = modelRaw.trim();
+    if (routeId <= 0 || !model) continue;
+
+    const key = `${routeId}::${model}`;
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    normalized.push({ routeId, model });
+    if (normalized.length >= 500) break;
+  }
+
+  if (normalized.length === 0) {
+    return { ok: false, message: 'items 中没有有效 routeId/model' };
+  }
+
+  return { ok: true, items: normalized };
+}
+
+function parseBatchRouteWideDecisionRouteIds(
+  input: unknown,
+): { ok: true; routeIds: number[] } | { ok: false; message: string } {
+  if (!input || typeof input !== 'object') {
+    return { ok: false, message: '请求体必须是对象' };
+  }
+
+  const routeIds = (input as BatchRouteWideDecisionRouteIds).routeIds;
+  if (!Array.isArray(routeIds) || routeIds.length === 0) {
+    return { ok: false, message: 'routeIds 必须是非空数组' };
+  }
+
+  const dedupe = new Set<number>();
+  const normalized: number[] = [];
+  for (const raw of routeIds) {
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
+    const routeId = Math.trunc(raw);
+    if (routeId <= 0 || dedupe.has(routeId)) continue;
+    dedupe.add(routeId);
+    normalized.push(routeId);
+    if (normalized.length >= 500) break;
+  }
+
+  if (normalized.length === 0) {
+    return { ok: false, message: 'routeIds 中没有有效 routeId' };
+  }
+
+  return { ok: true, routeIds: normalized };
+}
+
 export async function tokensRoutes(app: FastifyInstance) {
   // List all routes
   app.get('/api/routes', async () => {
@@ -177,14 +390,49 @@ export async function tokensRoutes(app: FastifyInstance) {
     return { success: true, decisions };
   });
 
+  app.post<{ Body: BatchRouteDecisionRouteModels }>('/api/routes/decision/by-route/batch', async (request, reply) => {
+    const parsed = parseBatchRouteDecisionRouteModels(request.body);
+    if (!parsed.ok) {
+      return reply.code(400).send({ success: false, message: parsed.message });
+    }
+
+    const decisions: Record<string, Record<string, ReturnType<typeof tokenRouter.explainSelection>>> = {};
+    for (const item of parsed.items) {
+      const routeKey = String(item.routeId);
+      if (!decisions[routeKey]) decisions[routeKey] = {};
+      decisions[routeKey][item.model] = tokenRouter.explainSelectionForRoute(item.routeId, item.model);
+    }
+
+    return { success: true, decisions };
+  });
+
+  app.post<{ Body: BatchRouteWideDecisionRouteIds }>('/api/routes/decision/route-wide/batch', async (request, reply) => {
+    const parsed = parseBatchRouteWideDecisionRouteIds(request.body);
+    if (!parsed.ok) {
+      return reply.code(400).send({ success: false, message: parsed.message });
+    }
+
+    const decisions: Record<string, ReturnType<typeof tokenRouter.explainSelection>> = {};
+    for (const routeId of parsed.routeIds) {
+      decisions[String(routeId)] = tokenRouter.explainSelectionRouteWide(routeId);
+    }
+
+    return { success: true, decisions };
+  });
+
   // Create a route
-  app.post<{ Body: { modelPattern: string; modelMapping?: string; enabled?: boolean } }>('/api/routes', async (request) => {
+  app.post<{ Body: { modelPattern: string; displayName?: string; displayIcon?: string; modelMapping?: string; enabled?: boolean } }>('/api/routes', async (request) => {
     const body = request.body;
-    return db.insert(schema.tokenRoutes).values({
+    const route = db.insert(schema.tokenRoutes).values({
       modelPattern: body.modelPattern,
+      displayName: body.displayName,
+      displayIcon: body.displayIcon,
       modelMapping: body.modelMapping,
       enabled: body.enabled ?? true,
     }).returning().get();
+
+    populateRouteChannelsByModelPattern(route.id, body.modelPattern);
+    return route;
   });
 
   // Update a route
@@ -193,6 +441,8 @@ export async function tokensRoutes(app: FastifyInstance) {
     const body = request.body as Record<string, unknown>;
     const updates: Record<string, unknown> = {};
 
+    if (body.displayName !== undefined) updates.displayName = body.displayName;
+    if (body.displayIcon !== undefined) updates.displayIcon = body.displayIcon;
     if (body.modelPattern !== undefined) updates.modelPattern = body.modelPattern;
     if (body.modelMapping !== undefined) updates.modelMapping = body.modelMapping;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
@@ -210,7 +460,7 @@ export async function tokensRoutes(app: FastifyInstance) {
   });
 
   // Add a channel to a route
-  app.post<{ Params: { id: string }; Body: { accountId: number; tokenId?: number; priority?: number; weight?: number } }>('/api/routes/:id/channels', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { accountId: number; tokenId?: number; sourceModel?: string; priority?: number; weight?: number } }>('/api/routes/:id/channels', async (request, reply) => {
     const routeId = parseInt(request.params.id, 10);
     const body = request.body;
 
@@ -219,6 +469,9 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: '路由不存在' });
     }
 
+    const sourceModel = typeof body.sourceModel === 'string'
+      ? body.sourceModel.trim()
+      : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
     const effectiveTokenId = body.tokenId ?? getDefaultTokenId(body.accountId);
 
     if (body.tokenId && !checkTokenBelongsToAccount(body.tokenId, body.accountId)) {
@@ -229,10 +482,23 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
     }
 
+    const duplicate = db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, routeId))
+      .all()
+      .some((channel) =>
+        channel.accountId === body.accountId
+        && (channel.tokenId ?? null) === (body.tokenId ?? null)
+        && (channel.sourceModel || '').trim().toLowerCase() === sourceModel.toLowerCase(),
+      );
+    if (duplicate) {
+      return reply.code(400).send({ success: false, message: '该来源模型的通道已存在' });
+    }
+
     return db.insert(schema.routeChannels).values({
       routeId,
       accountId: body.accountId,
       tokenId: body.tokenId,
+      sourceModel: sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
     }).returning().get();
@@ -299,6 +565,11 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     const updates: Record<string, unknown> = { manualOverride: true };
+    if (body.sourceModel !== undefined) {
+      if (body.sourceModel === null) updates.sourceModel = null;
+      else updates.sourceModel = String(body.sourceModel).trim() || null;
+    }
+
     for (const key of ['priority', 'weight', 'enabled', 'tokenId']) {
       if (body[key] !== undefined) updates[key] = body[key];
     }

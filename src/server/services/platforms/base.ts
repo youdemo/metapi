@@ -1,4 +1,5 @@
 import type { RequestInit as UndiciRequestInit } from 'undici';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 export interface CheckinResult {
   success: boolean;
@@ -183,7 +184,8 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
         ...options?.headers,
       },
     };
-    const res = await fetch(url, requestOptions);
+    const proxiedRequestOptions = withSiteProxyRequestInit(url, requestOptions);
+    const res = await fetch(url, proxiedRequestOptions);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     }

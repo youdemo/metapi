@@ -9,6 +9,7 @@ import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
+import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import {
   type DownstreamFormat,
   createStreamTransformContext,
@@ -27,6 +28,11 @@ import {
   isEndpointDowngradeError,
   resolveUpstreamEndpointCandidates,
 } from './upstreamEndpoint.js';
+import {
+  ensureModelAllowedForDownstreamKey,
+  getDownstreamRoutingPolicy,
+  recordDownstreamCostUsage,
+} from './downstreamPolicy.js';
 
 const MAX_RETRIES = 2;
 const CLAUDE_SSE_EVENT_NAMES = new Set([
@@ -42,6 +48,18 @@ const CLAUDE_SSE_EVENT_NAMES = new Set([
 
 function withUpstreamPath(path: string, message: string): string {
   return `[upstream:${path}] ${message}`;
+}
+
+function shouldRetryClaudeMessagesWithNormalizedBody(
+  downstreamFormat: DownstreamFormat,
+  endpointPath: string,
+  status: number,
+  upstreamErrorText: string,
+): boolean {
+  if (downstreamFormat !== 'claude') return false;
+  if (!endpointPath.includes('/v1/messages')) return false;
+  if (status < 400 || status >= 500) return false;
+  return /messages\s+is\s+required/i.test(upstreamErrorText);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -116,18 +134,20 @@ async function handleChatProxyRequest(
   }
 
   const { requestedModel, isStream, upstreamBody, claudeOriginalBody } = parsedRequest.value!;
+  if (!ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+  const downstreamPolicy = getDownstreamRoutingPolicy(request);
 
   const excludeChannelIds: number[] = [];
   let retryCount = 0;
 
   while (retryCount <= MAX_RETRIES) {
     let selected = retryCount === 0
-      ? tokenRouter.selectChannel(requestedModel)
-      : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds);
+      ? tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+      : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
     if (!selected && retryCount === 0) {
       await refreshModelsAndRebuildRoutes();
-      selected = tokenRouter.selectChannel(requestedModel);
+      selected = tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     }
 
     if (!selected) {
@@ -165,6 +185,8 @@ async function handleChatProxyRequest(
           modelName,
           stream: isStream,
           tokenValue: selected.tokenValue,
+          sitePlatform: selected.site.platform,
+          siteUrl: selected.site.url,
           openaiBody: upstreamBody,
           downstreamFormat,
           claudeOriginalBody,
@@ -174,11 +196,11 @@ async function handleChatProxyRequest(
         const targetUrl = `${selected.site.url}${endpointRequest.path}`;
         startTime = Date.now();
 
-        const response = await fetch(targetUrl, {
+        const response = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
           method: 'POST',
           headers: endpointRequest.headers,
           body: JSON.stringify(endpointRequest.body),
-        });
+        }));
 
         if (response.ok) {
           upstream = response;
@@ -187,6 +209,42 @@ async function handleChatProxyRequest(
         }
 
         const rawErrText = await response.text().catch(() => 'unknown error');
+
+        if (shouldRetryClaudeMessagesWithNormalizedBody(downstreamFormat, endpointRequest.path, response.status, rawErrText)) {
+          const normalizedClaudeRequest = buildUpstreamEndpointRequest({
+            endpoint: endpointCandidates[endpointIndex],
+            modelName,
+            stream: isStream,
+            tokenValue: selected.tokenValue,
+            sitePlatform: selected.site.platform,
+            siteUrl: selected.site.url,
+            openaiBody: upstreamBody,
+            downstreamFormat,
+            claudeOriginalBody: undefined,
+            downstreamHeaders: request.headers as Record<string, unknown>,
+          });
+          const normalizedTargetUrl = `${selected.site.url}${normalizedClaudeRequest.path}`;
+          const normalizedResponse = await fetch(normalizedTargetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+            method: 'POST',
+            headers: normalizedClaudeRequest.headers,
+            body: JSON.stringify(normalizedClaudeRequest.body),
+          }));
+
+          if (normalizedResponse.ok) {
+            upstream = normalizedResponse;
+            successfulUpstreamPath = normalizedClaudeRequest.path;
+            break;
+          }
+
+          const normalizedErrText = await normalizedResponse.text().catch(() => 'unknown error');
+          finalStatus = normalizedResponse.status;
+          finalErrText = withUpstreamPath(
+            normalizedClaudeRequest.path,
+            `normalized-claude-body fallback failed: ${normalizedErrText}`,
+          );
+          break;
+        }
+
         const errText = withUpstreamPath(endpointRequest.path, rawErrText);
         const shouldDowngradeEndpoint = (
           endpointIndex < endpointCandidates.length - 1
@@ -332,6 +390,7 @@ async function handleChatProxyRequest(
           }
 
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+          recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected,
             requestedModel,
@@ -470,6 +529,7 @@ async function handleChatProxyRequest(
         }
 
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
           requestedModel,
@@ -530,6 +590,7 @@ async function handleChatProxyRequest(
       }
 
       tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+      recordDownstreamCostUsage(request, estimatedCost);
       logProxy(
         selected,
         requestedModel,

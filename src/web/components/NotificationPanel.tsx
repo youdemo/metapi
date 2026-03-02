@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { formatDateTimeMinuteLocal } from '../pages/helpers/checkinLogTime.js';
+import { buildEventNavigationPath } from '../pages/helpers/navigationFocus.js';
 import { useI18n } from '../i18n.js';
 
 const levelColors: Record<string, string> = {
@@ -33,6 +35,7 @@ export default function NotificationPanel({
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string>('');
   const panelRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -110,30 +113,53 @@ export default function NotificationPanel({
             {tr('暂无通知')}
           </div>
         )}
-        {events.map((ev: any) => (
-          <div key={ev.id} style={{
-            padding: '10px 16px',
-            borderBottom: '1px solid var(--color-border-light)',
-            display: 'flex', gap: 10, alignItems: 'flex-start',
-          }}>
-            <div style={{
-              width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 5,
-              background: levelColors[ev.level] || 'var(--color-info)',
-            }} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                <span style={{ fontWeight: 500, fontSize: 13 }}>{ev.title}</span>
-                <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 8, background: 'var(--color-bg)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border-light)' }}>
-                  {tr(typeLabels[ev.type] || ev.type)}
-                </span>
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>{ev.message}</div>
-              <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                {formatDateTimeMinuteLocal(ev.createdAt)}
+        {events.map((ev: any) => {
+          const targetPath = buildEventNavigationPath(ev);
+          const openTarget = () => {
+            onClose();
+            navigate(targetPath);
+          };
+          return (
+            <div
+              key={ev.id}
+              className="notification-event-item"
+              style={{
+                padding: '10px 16px',
+                borderBottom: '1px solid var(--color-border-light)',
+                display: 'flex',
+                gap: 10,
+                alignItems: 'flex-start',
+                cursor: 'pointer',
+              }}
+              onClick={openTarget}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  openTarget();
+                }
+              }}
+            >
+              <div style={{
+                width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 5,
+                background: levelColors[ev.level] || 'var(--color-info)',
+              }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontWeight: 500, fontSize: 13 }}>{ev.title}</span>
+                  <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 8, background: 'var(--color-bg)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border-light)' }}>
+                    {tr(typeLabels[ev.type] || ev.type)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>{ev.message}</div>
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                  {formatDateTimeMinuteLocal(ev.createdAt)}
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

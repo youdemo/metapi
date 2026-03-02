@@ -9,6 +9,7 @@
 ## 前置条件
 
 - Docker 与 Docker Compose（推荐）
+- 或下载 [Release 包](https://github.com/cita-777/metapi/releases) + Node.js 20+（免 Docker 运行）
 - 或 Node.js 20+ 与 npm（本地开发）
 
 ## 方式一：Docker Compose 部署（推荐）
@@ -59,7 +60,36 @@ docker compose up -d
 > 如果未显式设置（非 Compose 场景），默认值为 `change-me-admin-token`（仅建议本地调试）。  
 > 若你在后台「设置」里修改过管理员令牌，后续登录请使用新令牌。
 
-## 方式二：本地开发启动
+## 方式二：Release 包启动（Linux / macOS / Windows）
+
+如果不想用 Docker，可以直接下载预打包的 Release 产物运行：
+
+1. 打开 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的压缩包
+2. 解压后进入目录
+3. 设置环境变量并启动
+
+Linux / macOS：
+
+```bash
+export AUTH_TOKEN=your-admin-token
+export PROXY_TOKEN=your-proxy-sk-token
+./start.sh
+```
+
+Windows（PowerShell）：
+
+```powershell
+$env:AUTH_TOKEN="your-admin-token"
+$env:PROXY_TOKEN="your-proxy-sk-token"
+.\start.bat
+```
+
+`start.sh` / `start.bat` 会自动检查 `better-sqlite3` ABI 兼容性、执行数据库迁移并启动服务。
+
+> [!NOTE]
+> Release 包依赖本机安装 Node.js（支持 20+，推荐 22 LTS）。
+
+## 方式三：本地开发启动
 
 ```bash
 git clone https://github.com/cita-777/metapi.git
@@ -81,7 +111,7 @@ npm run dev
 进入 **站点管理**，添加你使用的上游中转站：
 
 - 填写站点名称和 URL
-- 选择平台类型（New API / One API / OneHub 等）
+- 选择平台类型（New API / One API / OneHub / DoneHub / Veloera / AnyRouter / Sub2API）
 - 填写站点的管理员 API Key（可选，部分功能需要）
 
 ### 步骤 2：添加账号

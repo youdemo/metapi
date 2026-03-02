@@ -102,6 +102,36 @@ describe('settings and auth events', () => {
     expect(body.message).toContain('sk-');
   });
 
+  it('rejects invalid bark url when bark channel is enabled', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        barkEnabled: true,
+        barkUrl: 'juricek.chen@gmail.com',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { message?: string };
+    expect(body.message).toContain('Bark URL');
+  });
+
+  it('rejects invalid webhook url when webhook channel is enabled', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        webhookEnabled: true,
+        webhookUrl: 'not-a-url',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { message?: string };
+    expect(body.message).toContain('Webhook URL');
+  });
+
   it('persists and returns routing fallback unit cost from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',

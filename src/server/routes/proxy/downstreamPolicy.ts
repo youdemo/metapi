@@ -1,0 +1,35 @@
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { getProxyAuthContext } from '../../middleware/auth.js';
+import { isModelAllowedByPolicyOrAllowedRoutes, recordManagedKeyCostUsage } from '../../services/downstreamApiKeyService.js';
+import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
+
+export function getDownstreamRoutingPolicy(request: FastifyRequest): DownstreamRoutingPolicy {
+  return getProxyAuthContext(request)?.policy || EMPTY_DOWNSTREAM_ROUTING_POLICY;
+}
+
+export function ensureModelAllowedForDownstreamKey(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  requestedModel: string,
+): boolean {
+  const authContext = getProxyAuthContext(request);
+  if (!authContext) return true;
+
+  if (isModelAllowedByPolicyOrAllowedRoutes(requestedModel, authContext.policy)) {
+    return true;
+  }
+
+  reply.code(403).send({
+    error: {
+      message: `Model not allowed for this API key: ${requestedModel}`,
+      type: 'permission_error',
+    },
+  });
+  return false;
+}
+
+export function recordDownstreamCostUsage(request: FastifyRequest, estimatedCost: number): void {
+  const authContext = getProxyAuthContext(request);
+  if (!authContext || authContext.keyId === null) return;
+  recordManagedKeyCostUsage(authContext.keyId, estimatedCost);
+}

@@ -10,6 +10,18 @@
 
 ---
 
+## 文档站运行
+
+```bash
+npm run docs:dev
+```
+
+构建静态站点：
+
+```bash
+npm run docs:build
+```
+
 ## 快速导航
 
 | 文档 | 适合谁 | 解决的问题 |
@@ -20,36 +32,21 @@
 | 🔌 [客户端接入](./client-integration.md) | 下游应用接入者 | Open WebUI、Cherry Studio、Cursor 等接入 |
 | 🔧 [运维手册](./operations.md) | 运维人员 | 备份恢复、日志排查、健康检查 |
 | ❓ [常见问题](./faq.md) | 所有用户 | 常见报错与修复路径 |
+| 🧩 [FAQ/教程贡献规范](./community/faq-tutorial-guidelines.md) | 社区贡献者 | 统一沉淀 FAQ、教程与排障经验 |
 | 📁 [目录规范](./project-structure.md) | 开发者 | 项目目录组织与约定 |
 
 ## 架构概览
 
-```text
-┌──────────────────────────────────────────────────┐
-│               下游客户端                          │
-│   Open WebUI / Cherry Studio / Cursor / Claude   │
-│   Code / Roo Code / Kilo Code / ...              │
-└───────────────────┬──────────────────────────────┘
-                    │  Authorization: Bearer <PROXY_TOKEN>
-                    ▼
-┌──────────────────────────────────────────────────┐
-│               Metapi 网关                         │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐ │
-│  │ 统一代理    │  │ 智能路由    │  │ 格式转换    │ │
-│  │ /v1/*      │  │ 成本+余额   │  │ OpenAI⇄    │ │
-│  │            │  │ +使用率     │  │ Claude     │ │
-│  └────────────┘  └────────────┘  └────────────┘ │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐ │
-│  │ 自动签到    │  │ 余额管理    │  │ 多渠道告警  │ │
-│  └────────────┘  └────────────┘  └────────────┘ │
-└───────────────────┬──────────────────────────────┘
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-   ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │ New API │ │ One API │ │ Veloera │  ...
-   └─────────┘ └─────────┘ └─────────┘
-```
+**下游客户端**（Cursor · Claude Code · Codex · Open WebUI · Cherry Studio 等）
+&emsp;↓ &ensp;`Authorization: Bearer <PROXY_TOKEN>`
+**Metapi 网关**
+&emsp;• 统一代理 `/v1/*` — 兼容 OpenAI / Claude 全接口
+&emsp;• 智能路由引擎 — 按成本、余额、可用率加权选路，失败自动冷却与重试
+&emsp;• 模型发现 — 自动聚合上游全部模型，零配置
+&emsp;• 格式转换 — OpenAI ⇄ Claude 双向透明转换
+&emsp;• 自动签到 · 余额管理 · 告警通知 · 数据看板
+&emsp;↓
+**上游平台**（New API · One API · OneHub · DoneHub · Veloera · AnyRouter · Sub2API …）
 
 ## 核心概念
 

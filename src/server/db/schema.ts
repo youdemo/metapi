@@ -5,7 +5,8 @@ export const sites = sqliteTable('sites', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),
   url: text('url').notNull(),
-  platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api'
+  platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini'
+  proxyUrl: text('proxy_url'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
   sortOrder: integer('sort_order').default(0),
@@ -101,6 +102,8 @@ export const tokenModelAvailability = sqliteTable('token_model_availability', {
 export const tokenRoutes = sqliteTable('token_routes', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   modelPattern: text('model_pattern').notNull(),
+  displayName: text('display_name'),
+  displayIcon: text('display_icon'),
   modelMapping: text('model_mapping'), // JSON
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
@@ -115,6 +118,7 @@ export const routeChannels = sqliteTable('route_channels', {
   routeId: integer('route_id').notNull().references(() => tokenRoutes.id, { onDelete: 'cascade' }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
   tokenId: integer('token_id').references(() => accountTokens.id, { onDelete: 'set null' }),
+  sourceModel: text('source_model'),
   priority: integer('priority').default(0),
   weight: integer('weight').default(10),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
@@ -162,6 +166,30 @@ export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value'), // JSON
 });
+
+export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  key: text('key').notNull(),
+  description: text('description'),
+  enabled: integer('enabled', { mode: 'boolean' }).default(true),
+  expiresAt: text('expires_at'),
+  maxCost: real('max_cost'),
+  usedCost: real('used_cost').default(0),
+  maxRequests: integer('max_requests'),
+  usedRequests: integer('used_requests').default(0),
+  supportedModels: text('supported_models'), // JSON array<string>
+  allowedRouteIds: text('allowed_route_ids'), // JSON array<number>
+  siteWeightMultipliers: text('site_weight_multipliers'), // JSON object { [siteId]: multiplier }
+  lastUsedAt: text('last_used_at'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  keyUnique: uniqueIndex('downstream_api_keys_key_unique').on(table.key),
+  nameIdx: index('downstream_api_keys_name_idx').on(table.name),
+  enabledIdx: index('downstream_api_keys_enabled_idx').on(table.enabled),
+  expiresAtIdx: index('downstream_api_keys_expires_at_idx').on(table.expiresAt),
+}));
 
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),

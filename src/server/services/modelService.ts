@@ -17,7 +17,10 @@ function normalizeModels(models: string[]): string[] {
 }
 
 function isExactModelPattern(modelPattern: string): boolean {
-  return !/[\*\?\[]/.test(modelPattern);
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[\*\?\[]/.test(normalized);
 }
 
 async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {

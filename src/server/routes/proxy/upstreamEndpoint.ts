@@ -26,6 +26,10 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizePlatformName(platform: unknown): string {
+  return asTrimmedString(platform).toLowerCase();
+}
+
 function headerValueToString(value: unknown): string | null {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -167,6 +171,28 @@ function sanitizeMessagesBodyForAnthropic(body: Record<string, unknown>): Record
   if (hasTemperature && hasTopP) {
     delete sanitized.top_p;
   }
+
+  // Claude Code may send thinking.type = "adaptive". Many Anthropic-compatible
+  // upstreams only accept enabled/disabled.
+  const thinking = sanitized.thinking;
+  if (isRecord(thinking)) {
+    const rawType = asTrimmedString(thinking.type).toLowerCase();
+    if (rawType === 'adaptive') {
+      const budgetTokens = toFiniteNumber(thinking.budget_tokens);
+      if (budgetTokens !== null && budgetTokens > 0) {
+        sanitized.thinking = {
+          ...thinking,
+          type: 'enabled',
+          budget_tokens: Math.trunc(budgetTokens),
+        };
+      } else {
+        sanitized.thinking = { type: 'disabled' };
+      }
+    } else if (rawType && rawType !== 'enabled' && rawType !== 'disabled') {
+      sanitized.thinking = { type: 'disabled' };
+    }
+  }
+
   return sanitized;
 }
 
@@ -337,7 +363,24 @@ function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
   return Array.from(normalized);
 }
 
-function preferredEndpointOrder(downstreamFormat: EndpointPreference): UpstreamEndpoint[] {
+function preferredEndpointOrder(downstreamFormat: EndpointPreference, sitePlatform?: string): UpstreamEndpoint[] {
+  const platform = normalizePlatformName(sitePlatform);
+
+  if (platform === 'gemini') {
+    // Gemini upstream is routed through OpenAI-compatible chat endpoint.
+    return ['chat'];
+  }
+
+  if (platform === 'openai') {
+    return downstreamFormat === 'responses'
+      ? ['responses', 'chat']
+      : ['chat', 'responses'];
+  }
+
+  if (platform === 'claude') {
+    return ['messages'];
+  }
+
   if (downstreamFormat === 'responses') {
     return ['responses', 'chat', 'messages'];
   }
@@ -352,14 +395,15 @@ export async function resolveUpstreamEndpointCandidates(
   modelName: string,
   downstreamFormat: EndpointPreference,
 ): Promise<UpstreamEndpoint[]> {
-  if ((context.site.platform || '').toLowerCase() === 'anyrouter') {
+  const sitePlatform = normalizePlatformName(context.site.platform);
+  if (sitePlatform === 'anyrouter') {
     // anyrouter deployments are effectively anthropic-protocol first.
     return downstreamFormat === 'responses'
       ? ['responses', 'messages', 'chat']
       : ['messages', 'chat'];
   }
 
-  const preferred = preferredEndpointOrder(downstreamFormat);
+  const preferred = preferredEndpointOrder(downstreamFormat, context.site.platform);
 
   try {
     const catalog = await fetchModelPricingCatalog({
@@ -415,6 +459,8 @@ export function buildUpstreamEndpointRequest(input: {
   modelName: string;
   stream: boolean;
   tokenValue: string;
+  sitePlatform?: string;
+  siteUrl?: string;
   openaiBody: Record<string, unknown>;
   downstreamFormat: EndpointPreference;
   claudeOriginalBody?: Record<string, unknown>;
@@ -425,12 +471,49 @@ export function buildUpstreamEndpointRequest(input: {
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
+  const sitePlatform = normalizePlatformName(input.sitePlatform);
+  const isClaudeUpstream = sitePlatform === 'claude';
+
+  const resolveGeminiEndpointPath = (endpoint: UpstreamEndpoint): string => {
+    const normalizedSiteUrl = asTrimmedString(input.siteUrl).toLowerCase();
+    const openAiCompatBase = /\/openai(?:\/|$)/.test(normalizedSiteUrl);
+    if (openAiCompatBase) {
+      return endpoint === 'responses'
+        ? '/responses'
+        : '/chat/completions';
+    }
+    return endpoint === 'responses'
+      ? '/v1beta/openai/responses'
+      : '/v1beta/openai/chat/completions';
+  };
+
+  const resolveEndpointPath = (endpoint: UpstreamEndpoint): string => {
+    if (sitePlatform === 'gemini') {
+      return resolveGeminiEndpointPath(endpoint);
+    }
+
+    if (sitePlatform === 'openai') {
+      if (endpoint === 'responses') return '/v1/responses';
+      return '/v1/chat/completions';
+    }
+
+    if (sitePlatform === 'claude') {
+      return '/v1/messages';
+    }
+
+    if (endpoint === 'messages') return '/v1/messages';
+    if (endpoint === 'responses') return '/v1/responses';
+    return '/v1/chat/completions';
+  };
+
   const passthroughHeaders = extractSafePassthroughHeaders(input.downstreamHeaders);
-  const commonHeaders = {
+  const commonHeaders: Record<string, string> = {
     ...passthroughHeaders,
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${input.tokenValue}`,
   };
+  if (!isClaudeUpstream) {
+    commonHeaders.Authorization = `Bearer ${input.tokenValue}`;
+  }
 
   if (input.endpoint === 'messages') {
     const claudeHeaders = input.downstreamFormat === 'claude'
@@ -460,7 +543,7 @@ export function buildUpstreamEndpointRequest(input: {
     }, input.stream);
 
     return {
-      path: '/v1/messages',
+      path: resolveEndpointPath('messages'),
       headers,
       body: sanitizedBody,
     };
@@ -486,7 +569,7 @@ export function buildUpstreamEndpointRequest(input: {
     }, input.stream);
 
     return {
-      path: '/v1/responses',
+      path: resolveEndpointPath('responses'),
       headers,
       body,
     };
@@ -494,7 +577,7 @@ export function buildUpstreamEndpointRequest(input: {
 
   const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
   return {
-    path: '/v1/chat/completions',
+    path: resolveEndpointPath('chat'),
     headers,
     body: {
       ...input.openaiBody,

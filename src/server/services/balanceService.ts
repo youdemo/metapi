@@ -2,13 +2,14 @@ import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
 import { eq } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
-import { isTokenExpiredError } from './alertRules.js';
+import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
 import { getAutoReloginConfig, resolvePlatformUserId } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
+import { withExplicitProxyRequestInit } from './siteProxy.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -128,6 +129,7 @@ async function fetchTodayIncomeFromLogs(params: {
   accessToken: string;
   platform?: string | null;
   platformUserId?: number;
+  proxyUrl?: string | null;
 }): Promise<number | null> {
   const baseUrl = params.baseUrl.trim();
   const accessToken = params.accessToken.trim();
@@ -162,10 +164,10 @@ async function fetchTodayIncomeFromLogs(params: {
       });
 
       try {
-        const response = await fetch(`${baseUrl}/api/log/self?${query.toString()}`, {
+        const response = await fetch(`${baseUrl}/api/log/self?${query.toString()}`, withExplicitProxyRequestInit(params.proxyUrl, {
           method: 'GET',
           headers,
-        });
+        }));
         if (!response.ok) break;
 
         const payload = await response.json().catch(() => null);
@@ -258,7 +260,7 @@ export async function refreshBalance(accountId: number) {
 
   const readBalance = async (token: string) => adapter.getBalance(site.url, token, platformUserId);
   const handleBalanceError = async (err: any) => {
-    const message = err?.message || 'unknown error';
+    const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
     setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: message,
@@ -272,7 +274,7 @@ export async function refreshBalance(accountId: number) {
         detail: message,
       });
     }
-    throw err;
+    throw new Error(message);
   };
 
   try {
@@ -310,6 +312,7 @@ export async function refreshBalance(accountId: number) {
         accessToken: activeAccessToken,
         platform: site.platform,
         platformUserId,
+        proxyUrl: site.proxyUrl,
       });
       if (typeof fallbackIncome === 'number' && Number.isFinite(fallbackIncome)) {
         balanceInfo.todayIncome = fallbackIncome;

@@ -1,6 +1,7 @@
 import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
+import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
@@ -453,7 +454,8 @@ export class NewApiAdapter extends BasePlatformAdapter {
         body: options?.body ?? undefined,
         headers,
       };
-      const res = await fetch(url, requestOptions);
+      const proxiedRequestOptions = withSiteProxyRequestInit(url, requestOptions);
+      const res = await fetch(url, proxiedRequestOptions);
       const text = await res.text();
       const parsed = this.parseJsonSafe<T>(text);
       if (parsed) return parsed;

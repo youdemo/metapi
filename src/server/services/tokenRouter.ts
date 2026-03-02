@@ -3,6 +3,7 @@ import { minimatch } from 'minimatch';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { getCachedModelRoutingReferenceCost } from './modelPricingService.js';
+import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 
 interface RouteMatch {
   route: typeof schema.tokenRoutes.$inferSelect;
@@ -94,10 +95,146 @@ export interface RouteDecisionExplanation {
   candidates: RouteDecisionCandidate[];
 }
 
+const DEFAULT_DOWNSTREAM_POLICY: DownstreamRoutingPolicy = EMPTY_DOWNSTREAM_ROUTING_POLICY;
+
+type ExplainSelectionOptions = {
+  excludeChannelIds?: number[];
+  bypassSourceModelCheck?: boolean;
+  useChannelSourceModelForCost?: boolean;
+  downstreamPolicy?: DownstreamRoutingPolicy;
+};
+
 type CostSignal = {
   unitCost: number;
   source: 'observed' | 'configured' | 'catalog' | 'fallback';
 };
+
+export function isRegexModelPattern(pattern: string): boolean {
+  return pattern.trim().toLowerCase().startsWith('re:');
+}
+
+export function parseRegexModelPattern(pattern: string): RegExp | null {
+  if (!isRegexModelPattern(pattern)) return null;
+  const body = pattern.trim().slice(3).trim();
+  if (!body) return null;
+  try {
+    return new RegExp(body);
+  } catch {
+    return null;
+  }
+}
+
+export function matchesModelPattern(model: string, pattern: string): boolean {
+  const normalizedPattern = (pattern || '').trim();
+  if (!normalizedPattern) return false;
+
+  if (normalizedPattern === model) return true;
+
+  if (isRegexModelPattern(normalizedPattern)) {
+    const re = parseRegexModelPattern(normalizedPattern);
+    return !!re && re.test(model);
+  }
+
+  return minimatch(model, normalizedPattern);
+}
+
+function normalizeRouteDisplayName(displayName: string | null | undefined): string {
+  return (displayName || '').trim();
+}
+
+function isRouteDisplayNameMatch(model: string, displayName: string | null | undefined): boolean {
+  const alias = normalizeRouteDisplayName(displayName);
+  return !!alias && alias === model;
+}
+
+function matchesRouteRequestModel(model: string, route: typeof schema.tokenRoutes.$inferSelect): boolean {
+  return matchesModelPattern(model, route.modelPattern) || isRouteDisplayNameMatch(model, route.displayName);
+}
+
+function getExposedModelNameForRoute(route: typeof schema.tokenRoutes.$inferSelect): string {
+  return normalizeRouteDisplayName(route.displayName) || route.modelPattern;
+}
+
+function normalizeModelAlias(modelName: string): string {
+  const normalized = (modelName || '').trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function isModelAliasEquivalent(left: string, right: string): boolean {
+  const a = normalizeModelAlias(left);
+  const b = normalizeModelAlias(right);
+  return !!a && !!b && a === b;
+}
+
+function channelSupportsRequestedModel(channelSourceModel: string | null | undefined, requestedModel: string): boolean {
+  const source = (channelSourceModel || '').trim();
+  if (!source) return true;
+  if (source === requestedModel) return true;
+  if (isModelAliasEquivalent(source, requestedModel)) return true;
+  if (matchesModelPattern(requestedModel, source)) return true;
+  return false;
+}
+
+function isModelAllowedByDownstreamPolicy(requestedModel: string, policy: DownstreamRoutingPolicy): boolean {
+  const supportedPatterns = Array.isArray(policy.supportedModels)
+    ? policy.supportedModels
+    : [];
+  const matchedSupportedPattern = supportedPatterns.some((pattern) => matchesModelPattern(requestedModel, pattern));
+  if (matchedSupportedPattern) return true;
+  if (policy.allowedRouteIds.length > 0) return true;
+  return supportedPatterns.length === 0;
+}
+
+function resolveMappedModel(requestedModel: string, modelMapping?: string | null): string {
+  if (!modelMapping) return requestedModel;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(modelMapping);
+  } catch {
+    return requestedModel;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return requestedModel;
+  }
+
+  const entries = Object.entries(parsed as Record<string, unknown>)
+    .filter(([, value]) => typeof value === 'string' && value.trim().length > 0) as Array<[string, string]>;
+
+  const exact = entries.find(([pattern]) => pattern === requestedModel);
+  if (exact) return exact[1].trim();
+
+  for (const [pattern, target] of entries) {
+    if (matchesModelPattern(requestedModel, pattern)) {
+      return target.trim();
+    }
+  }
+
+  return requestedModel;
+}
+
+function normalizeChannelSourceModel(channelSourceModel: string | null | undefined): string {
+  return (channelSourceModel || '').trim();
+}
+
+function resolveActualModelForSelectedChannel(
+  requestedModel: string,
+  route: typeof schema.tokenRoutes.$inferSelect,
+  mappedModel: string,
+  channelSourceModel: string | null | undefined,
+): string {
+  const sourceModel = normalizeChannelSourceModel(channelSourceModel);
+  if (isRouteDisplayNameMatch(requestedModel, route.displayName) && sourceModel) {
+    return sourceModel;
+  }
+  return mappedModel;
+}
 
 function resolveEffectiveUnitCost(candidate: RouteChannelCandidate, modelName: string): CostSignal {
   const successCount = Math.max(0, candidate.channel.successCount ?? 0);
@@ -141,23 +278,21 @@ export class TokenRouter {
    * Find matching route and select a channel for the given model.
    * Returns null if no route/channel available.
    */
-  selectChannel(requestedModel: string): SelectedChannel | null {
-    const match = this.findRoute(requestedModel);
+  selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): SelectedChannel | null {
+    if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
+
+    const match = this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
 
-    // Apply model mapping if configured
-    let actualModel = requestedModel;
-    if (match.route.modelMapping) {
-      try {
-        const mapping = JSON.parse(match.route.modelMapping);
-        if (mapping[requestedModel]) actualModel = mapping[requestedModel];
-      } catch {}
-    }
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const bypassSourceModelCheck = requestedByDisplayName;
 
     // Filter channels: enabled, not in cooldown, account/site active with token
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const available = match.channels.filter((c) =>
+      (bypassSourceModelCheck || channelSupportsRequestedModel(c.channel.sourceModel, requestedModel)) &&
       c.channel.enabled &&
       c.account.status === 'active' &&
       !isSiteDisabled(c.site.status) &&
@@ -185,10 +320,22 @@ export class TokenRouter {
         nowMs,
         RECENT_FAILURE_AVOID_SEC,
       );
-      const selected = this.weightedRandomSelect(candidates, actualModel);
+      const selected = this.weightedRandomSelect(
+        candidates,
+        requestedByDisplayName
+          ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
+          : mappedModel,
+        downstreamPolicy,
+      );
       if (selected) {
         const tokenValue = this.resolveChannelTokenValue(selected);
         if (!tokenValue) continue;
+        const actualModel = resolveActualModelForSelectedChannel(
+          requestedModel,
+          match.route,
+          mappedModel,
+          selected.channel.sourceModel,
+        );
 
         return {
           ...selected,
@@ -205,21 +352,24 @@ export class TokenRouter {
   /**
    * Select next channel for failover (exclude already-tried channels).
    */
-  selectNextChannel(requestedModel: string, excludeChannelIds: number[]): SelectedChannel | null {
-    const match = this.findRoute(requestedModel);
+  selectNextChannel(
+    requestedModel: string,
+    excludeChannelIds: number[],
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+  ): SelectedChannel | null {
+    if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
+
+    const match = this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
 
-    let actualModel = requestedModel;
-    if (match.route.modelMapping) {
-      try {
-        const mapping = JSON.parse(match.route.modelMapping);
-        if (mapping[requestedModel]) actualModel = mapping[requestedModel];
-      } catch {}
-    }
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const bypassSourceModelCheck = requestedByDisplayName;
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const available = match.channels.filter((c) =>
+      (bypassSourceModelCheck || channelSupportsRequestedModel(c.channel.sourceModel, requestedModel)) &&
       c.channel.enabled &&
       c.account.status === 'active' &&
       !isSiteDisabled(c.site.status) &&
@@ -244,11 +394,23 @@ export class TokenRouter {
         nowMs,
         RECENT_FAILURE_AVOID_SEC,
       );
-      const selected = this.weightedRandomSelect(candidates, actualModel);
+      const selected = this.weightedRandomSelect(
+        candidates,
+        requestedByDisplayName
+          ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
+          : mappedModel,
+        downstreamPolicy,
+      );
       if (!selected) continue;
 
       const tokenValue = this.resolveChannelTokenValue(selected);
       if (!tokenValue) continue;
+      const actualModel = resolveActualModelForSelectedChannel(
+        requestedModel,
+        match.route,
+        mappedModel,
+        selected.channel.sourceModel,
+      );
 
       return {
         ...selected,
@@ -261,8 +423,43 @@ export class TokenRouter {
     return null;
   }
 
-  explainSelection(requestedModel: string, excludeChannelIds: number[] = []): RouteDecisionExplanation {
-    const match = this.findRoute(requestedModel);
+  explainSelection(
+    requestedModel: string,
+    excludeChannelIds: number[] = [],
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+  ): RouteDecisionExplanation {
+    const match = this.findRoute(requestedModel, downstreamPolicy);
+    return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+  }
+
+  explainSelectionForRoute(
+    routeId: number,
+    requestedModel: string,
+    excludeChannelIds: number[] = [],
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+  ): RouteDecisionExplanation {
+    const match = this.findRouteById(routeId, downstreamPolicy);
+    return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+  }
+
+  explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): RouteDecisionExplanation {
+    const match = this.findRouteById(routeId, downstreamPolicy);
+    const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
+    return this.explainSelectionFromMatch(match, fallbackRequestedModel, {
+      bypassSourceModelCheck: true,
+      useChannelSourceModelForCost: true,
+      downstreamPolicy,
+    });
+  }
+
+  private explainSelectionFromMatch(
+    match: RouteMatch | null,
+    requestedModel: string,
+    options: ExplainSelectionOptions = {},
+  ): RouteDecisionExplanation {
+    const excludeChannelIds = options.excludeChannelIds ?? [];
+    const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
+
     if (!match) {
       return {
         requestedModel,
@@ -273,23 +470,27 @@ export class TokenRouter {
       };
     }
 
-    let actualModel = requestedModel;
-    if (match.route.modelMapping) {
-      try {
-        const mapping = JSON.parse(match.route.modelMapping) as Record<string, string>;
-        if (mapping[requestedModel]) actualModel = mapping[requestedModel];
-      } catch {}
-    }
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const bypassSourceModelCheck = (options.bypassSourceModelCheck ?? false) || requestedByDisplayName;
+    const useChannelSourceModelForCost = (options.useChannelSourceModelForCost ?? false) || requestedByDisplayName;
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const summary: string[] = [`命中路由：${match.route.modelPattern}`];
+    if (requestedByDisplayName) {
+      summary.push(`按显示名命中：${normalizeRouteDisplayName(match.route.displayName)}`);
+      summary.push('显示名仅用于聚合展示，实际转发模型按选中通道来源模型决定');
+    }
     const availableByPriority = new Map<number, RouteChannelCandidate[]>();
     const candidates: RouteDecisionCandidate[] = [];
     const candidateMap = new Map<number, RouteDecisionCandidate>();
 
     for (const row of match.channels) {
       const reasonParts: string[] = [];
+      if (!bypassSourceModelCheck && !channelSupportsRequestedModel(row.channel.sourceModel, requestedModel)) {
+        reasonParts.push(`来源模型不匹配=${row.channel.sourceModel || ''}`);
+      }
       if (!row.channel.enabled) reasonParts.push('通道禁用');
       if (row.account.status !== 'active') reasonParts.push(`账号状态=${row.account.status}`);
       if (isSiteDisabled(row.site.status)) reasonParts.push(`站点状态=${row.site.status || 'disabled'}`);
@@ -328,7 +529,7 @@ export class TokenRouter {
       summary.push('没有可用通道（全部被禁用、站点不可用、冷却或令牌不可用）');
       return {
         requestedModel,
-        actualModel,
+        actualModel: mappedModel,
         matched: true,
         routeId: match.route.id,
         modelPattern: match.route.modelPattern,
@@ -356,7 +557,13 @@ export class TokenRouter {
         }
       }
 
-      const weighted = this.calculateWeightedSelection(filteredLayer, actualModel);
+      const weighted = this.calculateWeightedSelection(
+        filteredLayer,
+        useChannelSourceModelForCost
+          ? (candidate) => (normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
+          : mappedModel,
+        downstreamPolicy,
+      );
       for (const detail of weighted.details) {
         const target = candidateMap.get(detail.candidate.channel.id);
         if (!target) continue;
@@ -381,7 +588,7 @@ export class TokenRouter {
       summary.push('本次未选出通道');
       return {
         requestedModel,
-        actualModel,
+        actualModel: mappedModel,
         matched: true,
         routeId: match.route.id,
         modelPattern: match.route.modelPattern,
@@ -394,7 +601,16 @@ export class TokenRouter {
     const selectedLabel = selectedChannel
       ? `${selectedChannel.username} @ ${selectedChannel.siteName} / ${selectedChannel.tokenName}`
       : `channel-${selected.channel.id}`;
+    const actualModel = resolveActualModelForSelectedChannel(
+      requestedModel,
+      match.route,
+      mappedModel,
+      selected.channel.sourceModel,
+    );
     summary.push(`最终选择：${selectedLabel}（P${selectedPriority}）`);
+    if (actualModel !== mappedModel) {
+      summary.push(`实际转发模型：${actualModel}`);
+    }
 
     return {
       requestedModel,
@@ -449,23 +665,52 @@ export class TokenRouter {
   getAvailableModels(): string[] {
     const routes = db.select().from(schema.tokenRoutes)
       .where(eq(schema.tokenRoutes.enabled, true)).all();
-    return routes.map((r) => r.modelPattern);
+    const exposed = routes
+      .map((route) => getExposedModelNameForRoute(route).trim())
+      .filter((name) => name.length > 0);
+    return Array.from(new Set(exposed));
   }
 
   // --- Private methods ---
 
-  private findRoute(model: string): RouteMatch | null {
-    const routes = db.select().from(schema.tokenRoutes)
+  private findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): RouteMatch | null {
+    let routes = db.select().from(schema.tokenRoutes)
       .where(eq(schema.tokenRoutes.enabled, true)).all();
 
-    // Find matching route by pattern
+    const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
+      ? downstreamPolicy.supportedModels
+      : [];
+    const matchedSupportedPattern = supportedPatterns.some((pattern) => matchesModelPattern(model, pattern));
+
+    if (downstreamPolicy.allowedRouteIds.length > 0 && !matchedSupportedPattern) {
+      const allowSet = new Set(downstreamPolicy.allowedRouteIds);
+      routes = routes.filter((route) => allowSet.has(route.id));
+    }
+
+    // Find matching route by model pattern or display alias.
     const matchedRoute = routes.find((r) => {
-      if (r.modelPattern === model) return true; // exact match
-      return minimatch(model, r.modelPattern); // glob match
+      return matchesRouteRequestModel(model, r);
     });
 
     if (!matchedRoute) return null;
 
+    return this.loadRouteMatch(matchedRoute);
+  }
+
+  private findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): RouteMatch | null {
+    if (downstreamPolicy.allowedRouteIds.length > 0 && !downstreamPolicy.allowedRouteIds.includes(routeId)) {
+      return null;
+    }
+
+    const route = db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, routeId))
+      .get();
+    if (!route || !route.enabled) return null;
+
+    return this.loadRouteMatch(route);
+  }
+
+  private loadRouteMatch(route: typeof schema.tokenRoutes.$inferSelect): RouteMatch {
     // Get channels with account, site and token info
     const channels = db
       .select()
@@ -473,7 +718,7 @@ export class TokenRouter {
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
-      .where(eq(schema.routeChannels.routeId, matchedRoute.id))
+      .where(eq(schema.routeChannels.routeId, route.id))
       .all();
 
     const mapped = channels.map((row) => ({
@@ -483,12 +728,13 @@ export class TokenRouter {
       token: row.account_tokens,
     }));
 
-    return { route: matchedRoute, channels: mapped };
+    return { route, channels: mapped };
   }
 
   private resolveChannelTokenValue(candidate: {
     channel: typeof schema.routeChannels.$inferSelect;
     account: typeof schema.accounts.$inferSelect;
+    site?: typeof schema.sites.$inferSelect | null;
     token: typeof schema.accountTokens.$inferSelect | null;
   }): string | null {
     if (candidate.channel.tokenId) {
@@ -499,17 +745,25 @@ export class TokenRouter {
     }
 
     const fallback = candidate.account.apiToken?.trim();
-    return fallback ? fallback : null;
+    if (fallback) return fallback;
+
+    const siteApiKey = candidate.site?.apiKey?.trim();
+    return siteApiKey ? siteApiKey : null;
   }
 
   private weightedRandomSelect(
     candidates: RouteChannelCandidate[],
-    modelName: string,
+    modelName: string | ((candidate: RouteChannelCandidate) => string),
+    downstreamPolicy: DownstreamRoutingPolicy,
   ) {
-    return this.calculateWeightedSelection(candidates, modelName).selected;
+    return this.calculateWeightedSelection(candidates, modelName, downstreamPolicy).selected;
   }
 
-  private calculateWeightedSelection(candidates: RouteChannelCandidate[], modelName: string) {
+  private calculateWeightedSelection(
+    candidates: RouteChannelCandidate[],
+    modelName: string | ((candidate: RouteChannelCandidate) => string),
+    downstreamPolicy: DownstreamRoutingPolicy,
+  ) {
     if (candidates.length === 0) {
       return {
         selected: null as RouteChannelCandidate | null,
@@ -529,7 +783,10 @@ export class TokenRouter {
     }
 
     const { baseWeightFactor, valueScoreFactor, costWeight, balanceWeight, usageWeight } = config.routingWeights;
-    const effectiveCosts = candidates.map((candidate) => resolveEffectiveUnitCost(candidate, modelName));
+    const resolveModelName = typeof modelName === 'function'
+      ? modelName
+      : (() => modelName);
+    const effectiveCosts = candidates.map((candidate) => resolveEffectiveUnitCost(candidate, resolveModelName(candidate)));
 
     const valueScores = candidates.map((c, i) => {
       const unitCost = effectiveCosts[i]?.unitCost || 1;
@@ -559,6 +816,10 @@ export class TokenRouter {
     const contributions = candidates.map((candidate, i) => {
       const siteChannels = Math.max(1, siteChannelCounts.get(candidate.site.id) || 1);
       let contribution = baseContributions[i] / siteChannels;
+      const siteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
+      if (siteMultiplier > 0 && Number.isFinite(siteMultiplier)) {
+        contribution *= siteMultiplier;
+      }
 
       // If upstream price is unknown and we are using fallback unit cost,
       // apply an explicit penalty so raising fallback cost meaningfully lowers probability.
@@ -578,10 +839,11 @@ export class TokenRouter {
         ? '实测'
         : (cost?.source === 'configured' ? '配置' : (cost?.source === 'catalog' ? '目录' : '默认'));
       const siteChannels = Math.max(1, siteChannelCounts.get(candidate.site.id) || 1);
+      const siteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
       return {
         candidate,
         probability,
-        reason: `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
+        reason: `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点倍率=${siteMultiplier.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
       };
     });
 

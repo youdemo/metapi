@@ -6,9 +6,15 @@ import { VeloeraAdapter } from './veloera.js';
 import { OneHubAdapter } from './oneHub.js';
 import { DoneHubAdapter } from './doneHub.js';
 import { Sub2ApiAdapter } from './sub2api.js';
+import { OpenAiAdapter } from './openai.js';
+import { ClaudeAdapter } from './claude.js';
+import { GeminiAdapter } from './gemini.js';
 
 const adapters: PlatformAdapter[] = [
   // Specific forks before generic adapters for better auto-detection.
+  new OpenAiAdapter(),
+  new ClaudeAdapter(),
+  new GeminiAdapter(),
   new AnyRouterAdapter(),
   new DoneHubAdapter(),
   new OneHubAdapter(),
@@ -38,6 +44,12 @@ const platformAliases: Record<string, string> = {
   'one-hub': 'one-hub',
   'done-hub': 'done-hub',
   sub2api: 'sub2api',
+  // Official upstream APIs
+  openai: 'openai',
+  anthropic: 'claude',
+  claude: 'claude',
+  gemini: 'gemini',
+  google: 'gemini',
 };
 
 function normalizePlatform(platform: string): string {

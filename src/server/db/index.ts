@@ -113,8 +113,79 @@ function ensureSiteStatusSchema() {
   `);
 }
 
+function ensureSiteProxySchema() {
+  if (!tableExists('sites')) {
+    return;
+  }
+
+  if (!tableColumnExists('sites', 'proxy_url')) {
+    sqlite.exec(`ALTER TABLE sites ADD COLUMN proxy_url text;`);
+  }
+}
+
+function ensureRouteGroupingSchema() {
+  if (!tableExists('token_routes') || !tableExists('route_channels')) {
+    return;
+  }
+
+  if (!tableColumnExists('token_routes', 'display_name')) {
+    sqlite.exec(`ALTER TABLE token_routes ADD COLUMN display_name text;`);
+  }
+
+  if (!tableColumnExists('token_routes', 'display_icon')) {
+    sqlite.exec(`ALTER TABLE token_routes ADD COLUMN display_icon text;`);
+  }
+
+  if (!tableColumnExists('route_channels', 'source_model')) {
+    sqlite.exec(`ALTER TABLE route_channels ADD COLUMN source_model text;`);
+  }
+}
+
+function ensureDownstreamApiKeySchema() {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS downstream_api_keys (
+      id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      name text NOT NULL,
+      key text NOT NULL,
+      description text,
+      enabled integer DEFAULT true,
+      expires_at text,
+      max_cost real,
+      used_cost real DEFAULT 0,
+      max_requests integer,
+      used_requests integer DEFAULT 0,
+      supported_models text,
+      allowed_route_ids text,
+      site_weight_multipliers text,
+      last_used_at text,
+      created_at text DEFAULT (datetime('now')),
+      updated_at text DEFAULT (datetime('now'))
+    );
+  `);
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS downstream_api_keys_key_unique
+    ON downstream_api_keys(key);
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS downstream_api_keys_name_idx
+    ON downstream_api_keys(name);
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS downstream_api_keys_enabled_idx
+    ON downstream_api_keys(enabled);
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS downstream_api_keys_expires_at_idx
+    ON downstream_api_keys(expires_at);
+  `);
+}
+
 ensureTokenManagementSchema();
 ensureSiteStatusSchema();
+ensureSiteProxySchema();
+ensureRouteGroupingSchema();
+ensureDownstreamApiKeySchema();
 
 export const db = drizzle(sqlite, { schema });
 export { schema };

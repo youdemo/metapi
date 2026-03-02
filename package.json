@@ -1,6 +1,6 @@
 {
   "name": "metapi",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Meta-layer management and unified proxy for AI API aggregation platforms",
   "keywords": [
     "ai",
@@ -26,6 +26,9 @@
     "build:web": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "build": "npm run build:web && npm run build:server",
+    "docs:dev": "vitepress dev docs --host 0.0.0.0 --port 4173",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs --host 0.0.0.0 --port 4173",
     "start": "node dist/server/index.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/db/migrate.ts",
@@ -60,6 +63,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "drizzle-kit": "^0.28.1",
+    "mermaid": "^11.12.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",
@@ -69,6 +73,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.3",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17",
     "vitest": "^2.1.8"
   },
   "overrides": {

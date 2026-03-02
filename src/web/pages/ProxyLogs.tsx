@@ -37,14 +37,17 @@ function formatLatency(ms: number) {
 }
 
 function latencyColor(ms: number) {
-  if (ms > 10000) return 'var(--color-danger)';
-  if (ms > 3000) return 'var(--color-warning)';
+  if (ms >= 3000) return 'var(--color-danger)';
+  if (ms >= 2000) return 'color-mix(in srgb, var(--color-warning) 30%, var(--color-danger))';
+  if (ms >= 1500) return 'color-mix(in srgb, var(--color-warning) 60%, var(--color-danger))';
+  if (ms >= 1000) return 'var(--color-warning)';
+  if (ms > 500) return 'color-mix(in srgb, var(--color-success) 60%, var(--color-warning))';
   return 'var(--color-success)';
 }
 
 function latencyBgColor(ms: number) {
-  if (ms > 10000) return 'color-mix(in srgb, var(--color-danger) 12%, transparent)';
-  if (ms > 3000) return 'color-mix(in srgb, var(--color-warning) 12%, transparent)';
+  if (ms >= 3000) return 'color-mix(in srgb, var(--color-danger) 12%, transparent)';
+  if (ms >= 1000) return 'color-mix(in srgb, var(--color-warning) 12%, transparent)';
   return 'color-mix(in srgb, var(--color-success) 12%, transparent)';
 }
 

@@ -125,7 +125,12 @@ const toNullableFiniteNumber = (value: unknown): number | null => {
   return null;
 };
 
-const isExactModelPattern = (modelPattern: string): boolean => !/[\*\?\[]/.test(modelPattern);
+const isExactModelPattern = (modelPattern: string): boolean => {
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[\*\?\[]/.test(normalized);
+};
 
 export const collectModelTesterModelNames = (
   marketplace: { models?: Array<{ name?: unknown }>; } | null | undefined,

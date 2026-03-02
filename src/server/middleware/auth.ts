@@ -1,5 +1,17 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config.js';
+import { authorizeDownstreamToken, consumeManagedKeyRequest } from '../services/downstreamApiKeyService.js';
+import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
+
+export interface ProxyAuthContext {
+  token: string;
+  source: 'managed' | 'global';
+  keyId: number | null;
+  keyName: string;
+  policy: DownstreamRoutingPolicy;
+}
+
+const proxyAuthContextByRequest = new WeakMap<FastifyRequest, ProxyAuthContext>();
 
 function normalizeIp(rawIp: string | null | undefined): string {
   const ip = (rawIp || '').trim();
@@ -63,8 +75,25 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
     return;
   }
 
-  if (token !== config.proxyToken) {
-    reply.code(403).send({ error: 'Invalid API key' });
+  const authResult = authorizeDownstreamToken(token);
+  if (!authResult.ok) {
+    reply.code(authResult.statusCode).send({ error: authResult.error });
     return;
   }
+
+  if (authResult.source === 'managed' && authResult.key) {
+    consumeManagedKeyRequest(authResult.key.id);
+  }
+
+  proxyAuthContextByRequest.set(request, {
+    token: authResult.token,
+    source: authResult.source,
+    keyId: authResult.key?.id ?? null,
+    keyName: authResult.key?.name || 'global',
+    policy: authResult.policy || EMPTY_DOWNSTREAM_ROUTING_POLICY,
+  });
+}
+
+export function getProxyAuthContext(request: FastifyRequest): ProxyAuthContext | null {
+  return proxyAuthContextByRequest.get(request) || null;
 }

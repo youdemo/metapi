@@ -3,6 +3,7 @@ export type SiteForm = {
   url: string;
   platform: string;
   apiKey: string;
+  proxyUrl: string;
 };
 
 export type SiteEditorState =
@@ -14,15 +15,16 @@ type SiteSaveAction =
   | { kind: 'update'; id: number; payload: SiteForm };
 
 export function emptySiteForm(): SiteForm {
-  return { name: '', url: '', platform: '', apiKey: '' };
+  return { name: '', url: '', platform: '', apiKey: '', proxyUrl: '' };
 }
 
-export function siteFormFromSite(site: Partial<SiteForm>): SiteForm {
+export function siteFormFromSite(site: Partial<SiteForm> & { proxyUrl?: string | null }): SiteForm {
   return {
     name: site.name ?? '',
     url: site.url ?? '',
     platform: site.platform ?? '',
     apiKey: site.apiKey ?? '',
+    proxyUrl: site.proxyUrl ?? '',
   };
 }
 

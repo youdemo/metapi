@@ -225,7 +225,7 @@ export default function Tokens() {
       if (status === 'failed') {
         toast.error(`同步失败：${resolveSyncMessage(res, '请检查账号令牌或站点状态')}`);
       } else if (status === 'skipped') {
-        toast.info(`同步已跳过：${resolveSyncMessage(res, '账号缺少可用会话令牌')}`);
+        toast.info(`同步已跳过：${resolveSyncMessage(res, '账号缺少可用 Session Cookie')}`);
       } else {
         toast.success(`同步完成：新增 ${res.created || 0}，更新 ${res.updated || 0}`);
       }

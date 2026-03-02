@@ -322,7 +322,7 @@ describe('NewApiAdapter', () => {
     expect(token).toBe('api-key-from-token-list');
   });
 
-  it('detects cookie session values as session tokens for anyrouter-like deployments', async () => {
+  it('detects cookie session values as session cookies for anyrouter-like deployments', async () => {
     const adapter = new NewApiAdapter();
     const result = await adapter.verifyToken(baseUrl, COOKIE_SESSION_TOKEN);
 

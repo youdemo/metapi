@@ -1,16 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import ChangeKeyModal from '../components/ChangeKeyModal.js';
+import { InlineBrandIcon, getBrand, useIconCdn } from '../components/BrandIcon.js';
 import {
   applyRoutingProfilePreset,
   resolveRoutingProfilePreset,
   type RoutingWeights,
 } from './helpers/routingProfiles.js';
+import { fuzzyMatch } from './helpers/fuzzySearch.js';
 import { clearAuthSession } from '../authSession.js';
 import { tr } from '../i18n.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
+const ROUTE_BRAND_ICON_PREFIX = 'brand:';
 
 type RuntimeSettings = {
   checkinCron: string;
@@ -22,6 +26,42 @@ type RuntimeSettings = {
   currentAdminIp?: string;
 };
 
+type DownstreamApiKeyItem = {
+  id: number;
+  name: string;
+  key: string;
+  keyMasked: string;
+  description: string | null;
+  enabled: boolean;
+  expiresAt: string | null;
+  maxCost: number | null;
+  usedCost: number;
+  maxRequests: number | null;
+  usedRequests: number;
+  supportedModels: string[];
+  allowedRouteIds: number[];
+  lastUsedAt: string | null;
+};
+
+type DownstreamCreateForm = {
+  name: string;
+  key: string;
+  description: string;
+  maxCost: string;
+  maxRequests: string;
+  expiresAt: string;
+  selectedModels: string[];
+  selectedGroupRouteIds: number[];
+};
+
+type RouteSelectorItem = {
+  id: number;
+  modelPattern: string;
+  displayName?: string | null;
+  displayIcon?: string | null;
+  enabled: boolean;
+};
+
 const defaultWeights: RoutingWeights = {
   baseWeightFactor: 0.5,
   valueScoreFactor: 0.5,
@@ -30,7 +70,37 @@ const defaultWeights: RoutingWeights = {
   usageWeight: 0.3,
 };
 
+function isRegexModelPattern(pattern: string): boolean {
+  return pattern.trim().toLowerCase().startsWith('re:');
+}
+
+function isExactModelPattern(modelPattern: string): boolean {
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (isRegexModelPattern(normalized)) return false;
+  return !/[\*\?\[]/.test(normalized);
+}
+
+function routeTitle(route: RouteSelectorItem): string {
+  const displayName = (route.displayName || '').trim();
+  return displayName || route.modelPattern;
+}
+
+function parseBrandIconValue(raw: string | null | undefined): string | null {
+  const normalized = (raw || '').trim();
+  if (!normalized.startsWith(ROUTE_BRAND_ICON_PREFIX)) return null;
+  const icon = normalized.slice(ROUTE_BRAND_ICON_PREFIX.length).trim();
+  return icon || null;
+}
+
+function resolveRouteBrandSource(route: RouteSelectorItem): string {
+  const title = routeTitle(route);
+  if (getBrand(title)) return title;
+  return route.modelPattern;
+}
+
 export default function Settings() {
+  const iconCdn = useIconCdn();
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     balanceRefreshCron: '0 * * * *',
@@ -49,12 +119,62 @@ export default function Settings() {
   const [clearingCache, setClearingCache] = useState(false);
   const [clearingUsage, setClearingUsage] = useState(false);
   const [showChangeKey, setShowChangeKey] = useState(false);
+  const [downstreamKeys, setDownstreamKeys] = useState<DownstreamApiKeyItem[]>([]);
+  const [downstreamLoading, setDownstreamLoading] = useState(false);
+  const [downstreamSaving, setDownstreamSaving] = useState(false);
+  const [downstreamOps, setDownstreamOps] = useState<Record<number, boolean>>({});
+  const [editingDownstreamId, setEditingDownstreamId] = useState<number | null>(null);
+  const [downstreamModalOpen, setDownstreamModalOpen] = useState(false);
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectorLoading, setSelectorLoading] = useState(false);
+  const [selectorRoutes, setSelectorRoutes] = useState<RouteSelectorItem[]>([]);
+  const [selectorModelSearch, setSelectorModelSearch] = useState('');
+  const [selectorGroupSearch, setSelectorGroupSearch] = useState('');
+  const [downstreamCreate, setDownstreamCreate] = useState<DownstreamCreateForm>({
+    name: '',
+    key: '',
+    description: '',
+    maxCost: '',
+    maxRequests: '',
+    expiresAt: '',
+    selectedModels: [],
+    selectedGroupRouteIds: [],
+  });
   const toast = useToast();
 
   const activeRoutingProfile = useMemo(
     () => resolveRoutingProfilePreset(runtime.routingWeights),
     [runtime.routingWeights],
   );
+
+  const exactModelOptions = useMemo(() => (
+    selectorRoutes
+      .filter((route) => isExactModelPattern(route.modelPattern))
+      .map((route) => route.modelPattern.trim())
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+  ), [selectorRoutes]);
+
+  const groupRouteOptions = useMemo(() => (
+    selectorRoutes
+      .filter((route) => !isExactModelPattern(route.modelPattern))
+      .sort((a, b) => routeTitle(a).localeCompare(routeTitle(b), undefined, { sensitivity: 'base' }))
+  ), [selectorRoutes]);
+
+  const filteredExactModelOptions = useMemo(() => {
+    const query = selectorModelSearch.trim();
+    if (!query) return exactModelOptions;
+    return exactModelOptions.filter((modelName) => fuzzyMatch(modelName, query));
+  }, [exactModelOptions, selectorModelSearch]);
+
+  const filteredGroupRouteOptions = useMemo(() => {
+    const query = selectorGroupSearch.trim();
+    if (!query) return groupRouteOptions;
+    return groupRouteOptions.filter((route) => {
+      const matchText = `${routeTitle(route)} ${route.modelPattern} ${route.displayName || ''}`;
+      return fuzzyMatch(matchText, query);
+    });
+  }, [groupRouteOptions, selectorGroupSearch]);
 
   const inputStyle: React.CSSProperties = {
     width: '100%',
@@ -67,12 +187,58 @@ export default function Settings() {
     color: 'var(--color-text-primary)',
   };
 
+  const toDateTimeLocal = (isoString: string | null | undefined): string => {
+    if (!isoString) return '';
+    const ts = Date.parse(isoString);
+    if (!Number.isFinite(ts)) return '';
+    const date = new Date(ts);
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mi = String(date.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+  };
+
+  const loadDownstreamKeys = async () => {
+    setDownstreamLoading(true);
+    try {
+      const res = await api.getDownstreamApiKeys();
+      const items = Array.isArray(res?.items) ? res.items : [];
+      setDownstreamKeys(items);
+    } catch (err: any) {
+      toast.error(err?.message || '加载下游 API Key 失败');
+    } finally {
+      setDownstreamLoading(false);
+    }
+  };
+
+  const loadRouteSelectorRoutes = async () => {
+    setSelectorLoading(true);
+    try {
+      const rows = await api.getRoutes();
+      setSelectorRoutes((Array.isArray(rows) ? rows : []).map((row: any) => ({
+        id: row.id,
+        modelPattern: row.modelPattern,
+        displayName: row.displayName,
+        displayIcon: row.displayIcon,
+        enabled: !!row.enabled,
+      })));
+    } catch (err: any) {
+      toast.error(err?.message || '加载路由列表失败');
+    } finally {
+      setSelectorLoading(false);
+    }
+  };
+
   const loadSettings = async () => {
     setLoading(true);
     try {
-      const [authInfo, runtimeInfo] = await Promise.all([
+      const [authInfo, runtimeInfo, downstreamInfo, routeRows] = await Promise.all([
         api.getAuthInfo(),
         api.getRuntimeSettings(),
+        api.getDownstreamApiKeys(),
+        api.getRoutes(),
       ]);
       setMaskedToken(authInfo.masked || '****');
       setRuntime({
@@ -96,6 +262,14 @@ export default function Settings() {
           ? runtimeInfo.adminIpAllowlist.join('\n')
           : '',
       );
+      setDownstreamKeys(Array.isArray(downstreamInfo?.items) ? downstreamInfo.items : []);
+      setSelectorRoutes((Array.isArray(routeRows) ? routeRows : []).map((row: any) => ({
+        id: row.id,
+        modelPattern: row.modelPattern,
+        displayName: row.displayName,
+        displayIcon: row.displayIcon,
+        enabled: !!row.enabled,
+      })));
     } catch (err: any) {
       toast.error(err?.message || '加载设置失败');
     } finally {
@@ -147,6 +321,163 @@ export default function Settings() {
     } finally {
       setSavingToken(false);
     }
+  };
+
+  const resetDownstreamForm = () => {
+    setEditingDownstreamId(null);
+    setDownstreamCreate({
+      name: '',
+      key: '',
+      description: '',
+      maxCost: '',
+      maxRequests: '',
+      expiresAt: '',
+      selectedModels: [],
+      selectedGroupRouteIds: [],
+    });
+  };
+
+  const openCreateDownstreamModal = () => {
+    resetDownstreamForm();
+    setDownstreamModalOpen(true);
+  };
+
+  const closeDownstreamModal = () => {
+    setDownstreamModalOpen(false);
+    resetDownstreamForm();
+  };
+
+  const closeSelectorModal = () => {
+    setSelectorOpen(false);
+    setSelectorModelSearch('');
+    setSelectorGroupSearch('');
+  };
+
+  const beginEditDownstream = (item: DownstreamApiKeyItem) => {
+    setEditingDownstreamId(item.id);
+    setDownstreamCreate({
+      name: item.name || '',
+      key: item.key || '',
+      description: item.description || '',
+      maxCost: item.maxCost === null || item.maxCost === undefined ? '' : String(item.maxCost),
+      maxRequests: item.maxRequests === null || item.maxRequests === undefined ? '' : String(item.maxRequests),
+      expiresAt: toDateTimeLocal(item.expiresAt),
+      selectedModels: Array.isArray(item.supportedModels)
+        ? [...new Set(item.supportedModels.map((model) => String(model).trim()).filter((model) => model.length > 0))]
+        : [],
+      selectedGroupRouteIds: Array.isArray(item.allowedRouteIds)
+        ? [...new Set(item.allowedRouteIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0).map((id) => Math.trunc(id)))]
+        : [],
+    });
+    setDownstreamModalOpen(true);
+  };
+
+  const saveDownstreamKey = async () => {
+    const name = downstreamCreate.name.trim();
+    const rawKey = downstreamCreate.key.trim();
+    if (!name) {
+      toast.info('请填写名称');
+      return;
+    }
+    if (!rawKey) {
+      toast.info('请填写 API Key');
+      return;
+    }
+    if (!rawKey.startsWith(PROXY_TOKEN_PREFIX)) {
+      toast.info('API Key 必须以 sk- 开头');
+      return;
+    }
+
+    setDownstreamSaving(true);
+    try {
+      const payload = {
+        name,
+        key: rawKey,
+        description: downstreamCreate.description.trim(),
+        expiresAt: downstreamCreate.expiresAt ? new Date(downstreamCreate.expiresAt).toISOString() : null,
+        maxCost: downstreamCreate.maxCost.trim() ? Number(downstreamCreate.maxCost.trim()) : null,
+        maxRequests: downstreamCreate.maxRequests.trim() ? Number(downstreamCreate.maxRequests.trim()) : null,
+        supportedModels: downstreamCreate.selectedModels,
+        allowedRouteIds: downstreamCreate.selectedGroupRouteIds,
+      };
+
+      if (editingDownstreamId) {
+        await api.updateDownstreamApiKey(editingDownstreamId, payload);
+        toast.success('下游 API Key 已更新');
+      } else {
+        await api.createDownstreamApiKey(payload);
+        toast.success('下游 API Key 已创建');
+      }
+      setDownstreamModalOpen(false);
+      resetDownstreamForm();
+      await loadDownstreamKeys();
+    } catch (err: any) {
+      toast.error(err?.message || '保存下游 API Key 失败');
+    } finally {
+      setDownstreamSaving(false);
+    }
+  };
+
+  const toggleModelSelection = (modelName: string) => {
+    setDownstreamCreate((prev) => {
+      const exists = prev.selectedModels.includes(modelName);
+      return {
+        ...prev,
+        selectedModels: exists
+          ? prev.selectedModels.filter((item) => item !== modelName)
+          : [...prev.selectedModels, modelName],
+      };
+    });
+  };
+
+  const toggleGroupRouteSelection = (routeId: number) => {
+    setDownstreamCreate((prev) => {
+      const exists = prev.selectedGroupRouteIds.includes(routeId);
+      return {
+        ...prev,
+        selectedGroupRouteIds: exists
+          ? prev.selectedGroupRouteIds.filter((item) => item !== routeId)
+          : [...prev.selectedGroupRouteIds, routeId],
+      };
+    });
+  };
+
+  const runDownstreamOp = async (id: number, action: () => Promise<void>) => {
+    setDownstreamOps((prev) => ({ ...prev, [id]: true }));
+    try {
+      await action();
+    } finally {
+      setDownstreamOps((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const toggleDownstreamEnabled = async (item: DownstreamApiKeyItem) => {
+    await runDownstreamOp(item.id, async () => {
+      await api.updateDownstreamApiKey(item.id, { enabled: !item.enabled });
+      await loadDownstreamKeys();
+      toast.success(item.enabled ? '已禁用' : '已启用');
+    });
+  };
+
+  const resetDownstreamUsage = async (item: DownstreamApiKeyItem) => {
+    await runDownstreamOp(item.id, async () => {
+      await api.resetDownstreamApiKeyUsage(item.id);
+      await loadDownstreamKeys();
+      toast.success('已重置用量');
+    });
+  };
+
+  const deleteDownstreamKey = async (item: DownstreamApiKeyItem) => {
+    if (!window.confirm(`确认删除 API Key：${item.name}？`)) return;
+    await runDownstreamOp(item.id, async () => {
+      await api.deleteDownstreamApiKey(item.id);
+      if (editingDownstreamId === item.id) {
+        setDownstreamModalOpen(false);
+        resetDownstreamForm();
+      }
+      await loadDownstreamKeys();
+      toast.success('已删除');
+    });
   };
 
   const saveRouting = async () => {
@@ -334,6 +665,72 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游 API Key 策略（按项目/分组）</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            每个下游 Key 可独立配置过期、额度，并通过勾选界面限制可访问的模型与群组。
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            <button onClick={openCreateDownstreamModal} className="btn btn-primary">
+              + 新增 API Key
+            </button>
+            <button onClick={loadDownstreamKeys} disabled={downstreamLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              {downstreamLoading ? '刷新中...' : '刷新列表'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {downstreamKeys.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无下游 API Key</div>
+            ) : downstreamKeys.map((item) => {
+              const opLoading = !!downstreamOps[item.id];
+              const quotaText = `${item.usedRequests}${item.maxRequests !== null ? `/${item.maxRequests}` : ''}`;
+              const costText = `$${item.usedCost.toFixed(6)}${item.maxCost !== null ? `/$${item.maxCost}` : ''}`;
+              return (
+                <div key={item.id} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: 13 }}>{item.name}</strong>
+                      <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-secondary)' }}>{item.keyMasked}</code>
+                      <span style={{
+                        fontSize: 12,
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        background: item.enabled ? 'var(--color-success-bg)' : 'var(--color-danger-bg)',
+                        color: item.enabled ? 'var(--color-success)' : 'var(--color-danger)',
+                      }}>
+                        {item.enabled ? '启用' : '禁用'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button onClick={() => beginEditDownstream(item)} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+                        编辑
+                      </button>
+                      <button onClick={() => toggleDownstreamEnabled(item)} disabled={opLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+                        {item.enabled ? '禁用' : '启用'}
+                      </button>
+                      <button onClick={() => resetDownstreamUsage(item)} disabled={opLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+                        重置用量
+                      </button>
+                      <button onClick={() => deleteDownstreamKey(item)} disabled={opLoading} className="btn btn-link btn-link-warning">
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                    <span>请求用量: {quotaText}</span>
+                    <span>费用用量: {costText}</span>
+                    <span>过期: {item.expiresAt ? new Date(item.expiresAt).toLocaleString() : '永久'}</span>
+                    <span>模型规则: {item.supportedModels.length || 0}</span>
+                    <span>群组限制: {item.allowedRouteIds.length || 0}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="card animate-slide-up stagger-5" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>路由策略</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             先选择预设策略，只有需要精调时再展开高级参数。
@@ -483,6 +880,344 @@ export default function Settings() {
           </div>
         </div>
       </div>
+      {downstreamModalOpen && (() => {
+        const modal = (
+          <div className="modal-backdrop" onClick={closeDownstreamModal}>
+            <div
+              className="modal-content"
+              style={{ maxWidth: 860 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                {editingDownstreamId ? '编辑下游 API Key' : '新增下游 API Key'}
+              </div>
+              <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+                  <input
+                    value={downstreamCreate.name}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, name: e.target.value }))}
+                    placeholder="名称（例如：cc-project）"
+                    style={inputStyle}
+                  />
+                  <input
+                    value={downstreamCreate.key}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, key: e.target.value.trim() }))}
+                    placeholder="sk-xxxx"
+                    style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                  />
+                  <input
+                    value={downstreamCreate.maxCost}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, maxCost: e.target.value }))}
+                    placeholder="最大费用（可选）"
+                    type="number"
+                    min={0}
+                    step={0.000001}
+                    style={inputStyle}
+                  />
+                  <input
+                    value={downstreamCreate.maxRequests}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, maxRequests: e.target.value }))}
+                    placeholder="最大请求数（可选）"
+                    type="number"
+                    min={0}
+                    step={1}
+                    style={inputStyle}
+                  />
+                  <input
+                    value={downstreamCreate.expiresAt}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, expiresAt: e.target.value }))}
+                    type="datetime-local"
+                    placeholder="过期时间（可选）"
+                    style={inputStyle}
+                  />
+                  <input
+                    value={downstreamCreate.description}
+                    onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, description: e.target.value }))}
+                    placeholder="备注（可选）"
+                    style={inputStyle}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    已选模型 {downstreamCreate.selectedModels.length} 个，已选群组 {downstreamCreate.selectedGroupRouteIds.length} 个
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      onClick={async () => {
+                        if (selectorRoutes.length === 0) await loadRouteSelectorRoutes();
+                        setSelectorModelSearch('');
+                        setSelectorGroupSearch('');
+                        setSelectorOpen(true);
+                      }}
+                      className="btn btn-ghost"
+                      style={{ border: '1px solid var(--color-border)' }}
+                    >
+                      勾选模型和群组
+                    </button>
+                    {(downstreamCreate.selectedModels.length > 0 || downstreamCreate.selectedGroupRouteIds.length > 0) && (
+                      <button
+                        onClick={() => setDownstreamCreate((prev) => ({ ...prev, selectedModels: [], selectedGroupRouteIds: [] }))}
+                        className="btn btn-link btn-link-warning"
+                      >
+                        清空选择
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button onClick={closeDownstreamModal} className="btn btn-ghost">取消</button>
+                <button onClick={saveDownstreamKey} disabled={downstreamSaving} className="btn btn-primary">
+                  {downstreamSaving
+                    ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</>
+                    : (editingDownstreamId ? '更新 API Key' : '新增 API Key')}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+        return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
+      })()}
+      {selectorOpen && (() => {
+        const modal = (
+          <div className="modal-backdrop" onClick={closeSelectorModal}>
+            <div
+              className="modal-content"
+              style={{ maxWidth: 860 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">勾选模型和群组</div>
+              <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  选择结果会保存到当前下游 API Key：精确模型用于模型白名单，群组用于路由范围限制。
+                </div>
+                {selectorLoading ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    <span className="spinner spinner-sm" />
+                    加载路由中...
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+                    <div style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                        精确模型 ({selectorModelSearch.trim()
+                          ? `${filteredExactModelOptions.length}/${exactModelOptions.length}`
+                          : exactModelOptions.length})
+                      </div>
+                      <input
+                        value={selectorModelSearch}
+                        onChange={(e) => setSelectorModelSearch(e.target.value)}
+                        placeholder="搜索精确模型（支持模糊匹配）"
+                        style={{ ...inputStyle, padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
+                      />
+                      <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {exactModelOptions.length === 0 ? (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可选精确模型</div>
+                        ) : filteredExactModelOptions.length === 0 ? (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>没有匹配的精确模型</div>
+                        ) : filteredExactModelOptions.map((modelName) => {
+                          const checked = downstreamCreate.selectedModels.includes(modelName);
+                          const brand = getBrand(modelName);
+                          return (
+                            <label
+                              key={modelName}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 10,
+                                cursor: 'pointer',
+                                border: `1px solid ${checked ? 'color-mix(in srgb, var(--color-primary) 45%, transparent)' : 'var(--color-border-light)'}`,
+                                borderRadius: 10,
+                                padding: '8px 10px',
+                                background: checked
+                                  ? 'color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-card))'
+                                  : 'var(--color-bg-card)',
+                                transition: 'all 0.15s ease',
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleModelSelection(modelName)}
+                                style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', flexShrink: 0 }}
+                              />
+                              <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <code
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: 12,
+                                    background: 'var(--color-bg)',
+                                    padding: '4px 10px',
+                                    borderRadius: 8,
+                                    color: 'var(--color-text-primary)',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                    maxWidth: '100%',
+                                  }}
+                                >
+                                  {brand ? (
+                                    <InlineBrandIcon model={modelName} size={18} />
+                                  ) : (
+                                    <span
+                                      style={{
+                                        width: 18,
+                                        height: 18,
+                                        borderRadius: 6,
+                                        background: 'var(--color-bg-card)',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        fontSize: 10,
+                                        color: 'var(--color-text-muted)',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {modelName.slice(0, 1).toUpperCase()}
+                                    </span>
+                                  )}
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {modelName}
+                                  </span>
+                                </code>
+                                {brand && (
+                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', paddingLeft: 6 }}>
+                                    {brand.name}
+                                  </div>
+                                )}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                        群组 ({selectorGroupSearch.trim()
+                          ? `${filteredGroupRouteOptions.length}/${groupRouteOptions.length}`
+                          : groupRouteOptions.length})
+                      </div>
+                      <input
+                        value={selectorGroupSearch}
+                        onChange={(e) => setSelectorGroupSearch(e.target.value)}
+                        placeholder="搜索群组（名称/匹配规则）"
+                        style={{ ...inputStyle, padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
+                      />
+                      <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {groupRouteOptions.length === 0 ? (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可选群组</div>
+                        ) : filteredGroupRouteOptions.length === 0 ? (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>没有匹配的群组</div>
+                        ) : filteredGroupRouteOptions.map((route) => {
+                          const checked = downstreamCreate.selectedGroupRouteIds.includes(route.id);
+                          const explicitBrandIcon = parseBrandIconValue(route.displayIcon);
+                          const textIcon = explicitBrandIcon ? '' : (route.displayIcon || '').trim();
+                          return (
+                            <label
+                              key={route.id}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'flex-start',
+                                gap: 10,
+                                cursor: 'pointer',
+                                border: `1px solid ${checked ? 'color-mix(in srgb, var(--color-primary) 45%, transparent)' : 'var(--color-border-light)'}`,
+                                borderRadius: 10,
+                                padding: '8px 10px',
+                                background: checked
+                                  ? 'color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-card))'
+                                  : 'var(--color-bg-card)',
+                                transition: 'all 0.15s ease',
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                style={{ marginTop: 4, width: 18, height: 18, accentColor: 'var(--color-primary)', flexShrink: 0 }}
+                                checked={checked}
+                                onChange={() => toggleGroupRouteSelection(route.id)}
+                              />
+                              <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <code
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: 12,
+                                    background: 'var(--color-bg)',
+                                    padding: '4px 10px',
+                                    borderRadius: 8,
+                                    color: 'var(--color-text-primary)',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                    maxWidth: '100%',
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      width: 18,
+                                      height: 18,
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      borderRadius: 6,
+                                      background: 'var(--color-bg-card)',
+                                      flexShrink: 0,
+                                      overflow: 'hidden',
+                                      fontSize: 12,
+                                      lineHeight: 1,
+                                    }}
+                                  >
+                                    {explicitBrandIcon ? (
+                                      <img
+                                        src={`${iconCdn}/${explicitBrandIcon.replace(/\./g, '-')}.png`}
+                                        alt={routeTitle(route)}
+                                        style={{ width: 18, height: 18, objectFit: 'contain' }}
+                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                        loading="lazy"
+                                      />
+                                    ) : textIcon ? (
+                                      textIcon
+                                    ) : (
+                                      <InlineBrandIcon model={resolveRouteBrandSource(route)} size={18} />
+                                    )}
+                                  </span>
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {routeTitle(route)}
+                                  </span>
+                                  {!route.enabled && (
+                                    <span
+                                      style={{
+                                        fontSize: 10,
+                                        padding: '1px 6px',
+                                        borderRadius: 999,
+                                        background: 'var(--color-danger-bg)',
+                                        color: 'var(--color-danger)',
+                                      }}
+                                    >
+                                      已禁用
+                                    </span>
+                                  )}
+                                </code>
+                                <code style={{ fontSize: 11, color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', paddingLeft: 6 }}>
+                                  {route.modelPattern}
+                                </code>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button onClick={closeSelectorModal} className="btn btn-ghost">关闭</button>
+              </div>
+            </div>
+          </div>
+        );
+        return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
+      })()}
     </div>
   );
 }

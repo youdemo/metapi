@@ -1,15 +1,21 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { getAccountsAddPanelStyle } from './helpers/accountsPanelStyle.js';
+import { clearFocusParams, readFocusAccountIntent } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 
 export default function Accounts() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [accounts, setAccounts] = useState<any[]>([]);
   const [sites, setSites] = useState<any[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [highlightAccountId, setHighlightAccountId] = useState<number | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState<'token' | 'login'>('token');
   const [loginForm, setLoginForm] = useState({ siteId: 0, username: '', password: '' });
@@ -18,18 +24,51 @@ export default function Accounts() {
   const [verifying, setVerifying] = useState(false);
   const [saving, setSaving] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [rebindTarget, setRebindTarget] = useState<any | null>(null);
+  const [rebindForm, setRebindForm] = useState({ accessToken: '', platformUserId: '' });
+  const [rebindVerifyResult, setRebindVerifyResult] = useState<any>(null);
+  const [rebindVerifying, setRebindVerifying] = useState(false);
+  const [rebindSaving, setRebindSaving] = useState(false);
+  const [highlightRebindPanel, setHighlightRebindPanel] = useState(false);
+  const [rebindFocusTrigger, setRebindFocusTrigger] = useState(0);
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rebindPanelRef = useRef<HTMLDivElement | null>(null);
+  const rebindPanelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = useToast();
 
-  const load = () => {
-    api.getAccounts().then(setAccounts).catch(() => toast.error('加载账号列表失败'));
-    api.getSites().then(setSites);
+  const load = async () => {
+    const [accountsResult, sitesResult] = await Promise.allSettled([
+      api.getAccounts(),
+      api.getSites(),
+    ]);
+    if (accountsResult.status === 'fulfilled') {
+      setAccounts(accountsResult.value || []);
+    } else {
+      toast.error('加载账号列表失败');
+    }
+    if (sitesResult.status === 'fulfilled') {
+      setSites(sitesResult.value || []);
+    }
+    setLoaded(true);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); }, []);
 
   const sortedAccounts = useMemo(
     () => sortItemsForDisplay(accounts, sortMode, (account) => account.balance || 0),
     [accounts, sortMode],
   );
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+      if (rebindPanelTimerRef.current) {
+        clearTimeout(rebindPanelTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleLoginAdd = async () => {
     if (!loginForm.siteId || !loginForm.username || !loginForm.password) return;
@@ -80,6 +119,10 @@ export default function Accounts() {
 
   const handleTokenAdd = async () => {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
+    if (!verifyResult?.success) {
+      toast.error('请先验证 Token 成功后再添加账号');
+      return;
+    }
     setSaving(true);
     try {
       const result = await api.addAccount({
@@ -109,9 +152,12 @@ export default function Accounts() {
 
   const withLoading = async (key: string, fn: () => Promise<any>, successMsg?: string) => {
     setActionLoading(s => ({ ...s, [key]: true }));
-    try { await fn(); if (successMsg) toast.success(successMsg); load(); }
+    try { await fn(); if (successMsg) toast.success(successMsg); }
     catch (e: any) { toast.error(e.message || '操作失败'); }
-    finally { setActionLoading(s => ({ ...s, [key]: false })); }
+    finally {
+      setActionLoading(s => ({ ...s, [key]: false }));
+      void load();
+    }
   };
 
   const inputStyle: React.CSSProperties = {
@@ -209,6 +255,127 @@ export default function Accounts() {
     }
   };
 
+  const extractPlatformUserId = (account: any): string => {
+    try {
+      const parsed = JSON.parse(account?.extraConfig || '{}');
+      const raw = parsed?.platformUserId;
+      const value = Number.parseInt(String(raw ?? ''), 10);
+      if (Number.isFinite(value) && value > 0) return String(value);
+    } catch {}
+    const guessed = Number.parseInt(String(account?.username || '').match(/(\d{3,8})$/)?.[1] || '', 10);
+    return Number.isFinite(guessed) && guessed > 0 ? String(guessed) : '';
+  };
+
+  const openRebindPanel = (account: any) => {
+    setRebindTarget(account);
+    setRebindForm({
+      accessToken: '',
+      platformUserId: extractPlatformUserId(account),
+    });
+    setRebindVerifyResult(null);
+    setRebindFocusTrigger((value) => value + 1);
+  };
+
+  const closeRebindPanel = () => {
+    setRebindTarget(null);
+    setRebindForm({ accessToken: '', platformUserId: '' });
+    setRebindVerifyResult(null);
+    setRebindVerifying(false);
+    setRebindSaving(false);
+    setHighlightRebindPanel(false);
+  };
+
+  useEffect(() => {
+    if (!rebindTarget || rebindFocusTrigger <= 0) return;
+
+    setHighlightRebindPanel(true);
+    rebindPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    if (rebindPanelTimerRef.current) {
+      clearTimeout(rebindPanelTimerRef.current);
+    }
+    rebindPanelTimerRef.current = setTimeout(() => {
+      setHighlightRebindPanel(false);
+    }, 2200);
+  }, [rebindFocusTrigger, rebindTarget]);
+
+  const handleVerifyRebindToken = async () => {
+    if (!rebindTarget || !rebindForm.accessToken.trim()) return;
+    setRebindVerifying(true);
+    setRebindVerifyResult(null);
+    try {
+      const result = await api.verifyToken({
+        siteId: rebindTarget.siteId,
+        accessToken: rebindForm.accessToken.trim(),
+        platformUserId: rebindForm.platformUserId ? Number.parseInt(rebindForm.platformUserId, 10) : undefined,
+      });
+      setRebindVerifyResult(result);
+      if (result.success && result.tokenType === 'session') {
+        toast.success('Session Token 验证成功，可以重新绑定');
+      } else if (result.success && result.tokenType !== 'session') {
+        toast.error('当前是 API Key，不是 Session Token');
+      } else {
+        toast.error(result.message || 'Token 无效');
+      }
+    } catch (e: any) {
+      toast.error(e.message || '验证失败');
+      setRebindVerifyResult({ success: false, message: e.message });
+    } finally {
+      setRebindVerifying(false);
+    }
+  };
+
+  const handleSubmitRebind = async () => {
+    if (!rebindTarget || !rebindForm.accessToken.trim()) return;
+    if (!(rebindVerifyResult?.success && rebindVerifyResult?.tokenType === 'session')) {
+      toast.error('请先验证新的 Session Token 成功');
+      return;
+    }
+    setRebindSaving(true);
+    try {
+      await api.rebindAccountSession(rebindTarget.id, {
+        accessToken: rebindForm.accessToken.trim(),
+        platformUserId: rebindForm.platformUserId ? Number.parseInt(rebindForm.platformUserId, 10) : undefined,
+      });
+      toast.success('账号重新绑定成功，状态已恢复');
+      closeRebindPanel();
+      load();
+    } catch (e: any) {
+      toast.error(e.message || '重新绑定失败');
+    } finally {
+      setRebindSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    const { accountId, openRebind } = readFocusAccountIntent(location.search);
+    if (!accountId || !loaded) return;
+
+    const target = sortedAccounts.find((account) => account.id === accountId);
+    const row = rowRefs.current.get(accountId);
+    const cleanedSearch = clearFocusParams(location.search);
+    if (!target || !row) {
+      navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+      return;
+    }
+
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightAccountId(accountId);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightAccountId((current) => (current === accountId ? null : current));
+    }, 2200);
+
+    if (openRebind && target.status === 'expired') {
+      setShowAdd(false);
+      if (!rebindTarget || rebindTarget.id !== target.id) {
+        openRebindPanel(target);
+      }
+    }
+
+    navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+  }, [loaded, location.pathname, location.search, navigate, openRebindPanel, rebindTarget, sortedAccounts]);
+
   return (
     <div className="animate-fade-in">
       <div className="page-header">
@@ -273,11 +440,11 @@ export default function Accounts() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="info-tip">
                 <div>
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>支持两种 Token 类型，系统自动识别</div>
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>支持两种凭证类型，系统自动识别</div>
                   <div><strong>API Key</strong>（在站点「令牌」页面生成）→ 用于代理转发</div>
-                  <div><strong>Session Token</strong>（从浏览器获取）→ 支持签到、余额查询等全部功能</div>
+                  <div><strong>Session Cookie</strong>（从浏览器获取）→ 支持签到、余额查询等全部功能</div>
                   <div style={{ opacity: 0.7, borderTop: '1px solid rgba(0,0,0,0.1)', paddingTop: 6, marginTop: 6 }}>
-                    获取 Session Token: <kbd style={{ padding: '1px 5px', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 3, fontSize: 11 }}>F12</kbd> → Application → Local Storage</div>
+                    获取 Session Cookie: <kbd style={{ padding: '1px 5px', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 3, fontSize: 11 }}>F12</kbd> → Application → Local Storage</div>
                 </div>
               </div>
               <ModernSelect
@@ -296,7 +463,7 @@ export default function Accounts() {
                 ]}
                 placeholder="选择站点"
               />
-              <textarea placeholder="粘贴 Session Token 或 API Key&#10;（系统会自动识别 Token 类型）"
+              <textarea placeholder="粘贴 Session Cookie 或 API Key&#10;（系统会自动识别凭证类型）"
                 value={tokenForm.accessToken}
                 onChange={e => { setTokenForm(f => ({ ...f, accessToken: e.target.value.trim() })); setVerifyResult(null); }}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)', height: 72, resize: 'none' as const }} />
@@ -306,7 +473,7 @@ export default function Accounts() {
                 <div className="alert alert-success animate-scale-in">
                   <div className="alert-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    会话令牌有效
+                    Session Cookie 有效
                   </div>
                   <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                     <div>用户名: <strong>{verifyResult.userInfo?.username || '未知'}</strong></div>
@@ -353,11 +520,16 @@ export default function Accounts() {
                   className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}>
                   {verifying ? <><span className="spinner spinner-sm" />验证中...</> : '验证 Token'}
                 </button>
-                <button onClick={handleTokenAdd} disabled={saving || !tokenForm.siteId || !tokenForm.accessToken}
+                <button onClick={handleTokenAdd} disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || !verifyResult?.success}
                   className="btn btn-success">
                   {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : '添加账号'}
                 </button>
               </div>
+              {!verifyResult?.success && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  请先点击“验证 Token”，验证成功后才能添加账号
+                </div>
+              )}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -390,6 +562,82 @@ export default function Accounts() {
         </div>
       )}
 
+      {rebindTarget && (
+        <div
+          ref={rebindPanelRef}
+          className={`card animate-scale-in rebind-panel ${highlightRebindPanel ? 'rebind-panel-highlight' : ''}`}
+          style={{ marginBottom: 16, padding: 16 }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--color-text-primary)' }}>
+              重新绑定 Session Token
+            </div>
+            <button className="btn btn-ghost" onClick={closeRebindPanel}>关闭</button>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            账号: {rebindTarget.username || '未命名'} @ {rebindTarget.site?.name || '-'}。请粘贴新的 Session Token，验证成功后再绑定。
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 220px', gap: 10, marginBottom: 10 }}>
+            <textarea
+              placeholder="粘贴新的 Session Token"
+              value={rebindForm.accessToken}
+              onChange={(e) => {
+                setRebindForm((prev) => ({ ...prev, accessToken: e.target.value.trim() }));
+                setRebindVerifyResult(null);
+              }}
+              style={{ ...inputStyle, fontFamily: 'var(--font-mono)', height: 74, resize: 'none' as const }}
+            />
+            <input
+              placeholder="用户 ID（可选）"
+              value={rebindForm.platformUserId}
+              onChange={(e) => {
+                setRebindForm((prev) => ({ ...prev, platformUserId: e.target.value.replace(/\D/g, '') }));
+                setRebindVerifyResult(null);
+              }}
+              style={inputStyle}
+            />
+          </div>
+
+          {rebindVerifyResult && rebindVerifyResult.success && rebindVerifyResult.tokenType === 'session' && (
+            <div className="alert alert-success animate-scale-in" style={{ marginBottom: 10 }}>
+              <div className="alert-title">Session Token 有效</div>
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                用户: {rebindVerifyResult.userInfo?.username || '未知'}
+                {rebindVerifyResult.apiToken ? `，已识别 API Key (${String(rebindVerifyResult.apiToken).slice(0, 8)}...)` : ''}
+              </div>
+            </div>
+          )}
+          {rebindVerifyResult && (!rebindVerifyResult.success || rebindVerifyResult.tokenType !== 'session') && (
+            <div className="alert alert-error animate-scale-in" style={{ marginBottom: 10 }}>
+              <div className="alert-title">
+                {rebindVerifyResult.message || 'Token 无效或类型不正确'}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={handleVerifyRebindToken}
+              disabled={rebindVerifying || !rebindForm.accessToken.trim()}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {rebindVerifying ? <><span className="spinner spinner-sm" />验证中...</> : '验证 Token'}
+            </button>
+            <button
+              onClick={handleSubmitRebind}
+              disabled={rebindSaving || !(rebindVerifyResult?.success && rebindVerifyResult?.tokenType === 'session')}
+              className="btn btn-success"
+            >
+              {rebindSaving
+                ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />绑定中...</>
+                : '确认重新绑定'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Accounts Table */}
       <div className="card" style={{ overflowX: 'auto' }}>
         {accounts.length > 0 ? (
@@ -407,7 +655,14 @@ export default function Accounts() {
             </thead>
             <tbody>
               {sortedAccounts.map((a: any, i: number) => (
-                <tr key={a.id} className={`animate-slide-up stagger-${Math.min(i + 1, 5)}`}>
+                <tr
+                  key={a.id}
+                  ref={(node) => {
+                    if (node) rowRefs.current.set(a.id, node);
+                    else rowRefs.current.delete(a.id);
+                  }}
+                  className={`animate-slide-up stagger-${Math.min(i + 1, 5)} ${highlightAccountId === a.id ? 'row-focus-highlight' : ''}`}
+                >
                   <td style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>{a.username || '未命名'}</td>
                   <td>
                     {a.site?.url ? (
@@ -517,6 +772,14 @@ export default function Accounts() {
                         className="btn btn-link btn-link-warning">
                         {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
                       </button>
+                      {a.status === 'expired' && (
+                        <button
+                          onClick={() => openRebindPanel(a)}
+                          className="btn btn-link btn-link-warning"
+                        >
+                          重新绑定
+                        </button>
+                      )}
                       <button onClick={() => withLoading(`delete-${a.id}`, () => api.deleteAccount(a.id), '已删除')} disabled={actionLoading[`delete-${a.id}`]}
                         className="btn btn-link btn-link-danger">
                         {actionLoading[`delete-${a.id}`] ? <span className="spinner spinner-sm" /> : '删除'}

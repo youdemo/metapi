@@ -1,4 +1,5 @@
 import type { RequestInit as UndiciRequestInit } from 'undici';
+import { withSiteProxyRequestInit } from './siteProxy.js';
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const PRICE_CACHE_FAILURE_TTL_MS = 60 * 1000;
@@ -258,13 +259,15 @@ async function fetchJson(url: string, options?: UndiciRequestInit): Promise<unkn
 
   try {
     const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      body: options?.body ?? undefined,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
+      ...withSiteProxyRequestInit(url, {
+        ...options,
+        signal: controller.signal,
+        body: options?.body ?? undefined,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options?.headers,
+        },
+      }),
     });
 
     if (!response.ok) {
