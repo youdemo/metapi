@@ -177,7 +177,7 @@ async function findExistingOauthAccount(input: {
     if (byKey) return byKey;
   }
 
-  if (email) {
+  if (!accountKey && email) {
     const byEmail = await db.select().from(schema.accounts).where(and(
       eq(schema.accounts.oauthProvider, input.provider),
       eq(schema.accounts.username, email),

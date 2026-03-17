@@ -95,6 +95,7 @@ describe('OAuthManagement page', () => {
           accountId: 7,
           provider: 'codex',
           email: 'codex-user@example.com',
+          accountKey: 'chatgpt-account-123',
           planType: 'plus',
           modelCount: 3,
           modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
@@ -126,6 +127,7 @@ describe('OAuthManagement page', () => {
         expect(text).toContain('codex-user@example.com');
         expect(text).toContain('plus');
         expect(text).toContain('3 个模型');
+        expect(text).toContain('chatgpt-account-123');
       });
     } finally {
       root?.unmount();
@@ -167,6 +169,7 @@ describe('OAuthManagement page', () => {
             accountId: 7,
             provider: 'codex',
             email: 'codex-user@example.com',
+            accountKey: 'chatgpt-account-123',
             planType: 'plus',
             modelCount: 3,
             modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
@@ -236,6 +239,8 @@ describe('OAuthManagement page', () => {
         'oauth-codex',
         expect.stringContaining('width=540'),
       );
+      expect(collectText(root!.root)).toContain('本地部署');
+      expect(collectText(root!.root)).toContain('云端部署');
       expect(collectText(root!.root)).toContain('ssh -L 1455:127.0.0.1:1455 root@metapi.example -p 22');
 
       await act(async () => {
@@ -334,10 +339,11 @@ describe('OAuthManagement page', () => {
       await vi.waitFor(async () => {
         await flushMicrotasks();
         expect(collectText(root!.root)).toContain('提交回调 URL');
+        expect(collectText(root!.root)).toContain('手动回调');
       });
 
       const textInput = root!.root.find((node) => (
-        node.type === 'input'
+        node.type === 'textarea'
         && node.props.value !== undefined
       ));
 
@@ -362,6 +368,7 @@ describe('OAuthManagement page', () => {
         'oauth-state-456',
         'http://localhost:54545/callback?code=test-code&state=oauth-state-456',
       );
+      expect(collectText(root!.root)).toContain('如果浏览器停在 localhost 错误页');
     } finally {
       root?.unmount();
     }

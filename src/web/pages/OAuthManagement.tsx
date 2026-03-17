@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { api, type OAuthConnectionInfo, type OAuthProviderInfo, type OAuthStartInstructions } from '../api.js';
 
 const POLL_INTERVAL_MS = 1500;
@@ -32,6 +32,46 @@ function openOAuthPopup(provider: string, authorizationUrl: string) {
 
 function resolveConnectionStatusLabel(status?: string): string {
   return status === 'abnormal' ? '异常' : '正常';
+}
+
+function renderCodeBlock(value: string) {
+  return (
+    <code style={{
+      display: 'block',
+      padding: '10px 12px',
+      borderRadius: 'var(--radius-sm)',
+      background: 'color-mix(in srgb, var(--color-primary) 6%, var(--color-bg))',
+      border: '1px solid color-mix(in srgb, var(--color-primary) 18%, var(--color-border))',
+      color: 'var(--color-text-primary)',
+      fontSize: 12,
+      lineHeight: 1.5,
+      wordBreak: 'break-all',
+      whiteSpace: 'pre-wrap',
+    }}
+    >
+      {value}
+    </code>
+  );
+}
+
+function renderGuideCard(title: string, description: string, children?: ReactNode) {
+  return (
+    <div style={{
+      border: '1px solid var(--color-border)',
+      borderRadius: 'var(--radius-md)',
+      background: 'var(--color-bg)',
+      padding: 14,
+      display: 'grid',
+      gap: 10,
+    }}
+    >
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)', marginBottom: 4 }}>{title}</div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>{description}</div>
+      </div>
+      {children}
+    </div>
+  );
 }
 
 export default function OAuthManagement() {
@@ -218,54 +258,89 @@ export default function OAuthManagement() {
       {activeSession && (
         <div className="card" style={{ padding: 20, marginBottom: 16 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>授权指引</div>
-          <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', display: 'grid', gap: 10 }}>
-            <div>回调地址固定为 {activeSession.instructions.redirectUri}</div>
-            <div>
-              打开授权页后，如果你在云端部署 metapi，请先在本地运行 SSH 隧道，再继续登录。
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div style={{
+              padding: 12,
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-border)',
+              background: 'color-mix(in srgb, var(--color-primary) 5%, var(--color-bg-card))',
+            }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>固定回调地址</div>
+              {renderCodeBlock(activeSession.instructions.redirectUri)}
             </div>
-            {activeSession.instructions.sshTunnelCommand && (
-              <div>
-                <div style={{ marginBottom: 4 }}>SSH 隧道命令</div>
-                <code>{activeSession.instructions.sshTunnelCommand}</code>
-              </div>
+
+            {renderGuideCard(
+              '本地部署',
+              'metapi 和浏览器在同一台机器时，不需要 SSH 隧道。直接点击“连接”，在弹窗里完成授权即可。',
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
+                如果浏览器能直接访问上面的 localhost 回调地址，授权完成后会自动回到 metapi。
+              </div>,
             )}
-            {activeSession.instructions.sshTunnelKeyCommand && (
-              <div>
-                <div style={{ marginBottom: 4 }}>SSH Key 隧道命令</div>
-                <code>{activeSession.instructions.sshTunnelKeyCommand}</code>
-              </div>
-            )}
-            <div>
-              如果授权完成后浏览器停在 localhost 错误页，复制完整地址，等待 {Math.max(1, Math.round(activeSession.instructions.manualCallbackDelayMs / 1000))} 秒后粘贴回来。
-            </div>
-            {manualCallbackVisible ? (
-              <div style={{ display: 'grid', gap: 8 }}>
-                <input
-                  type="text"
-                  value={manualCallbackUrl}
-                  onChange={(event) => setManualCallbackUrl(event.target.value)}
-                  placeholder="粘贴完整的 callback URL"
-                />
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={handleSubmitManualCallback}
-                    disabled={manualCallbackSubmitting}
-                  >
-                    {manualCallbackSubmitting ? '提交中...' : '提交回调 URL'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => openOAuthPopup(activeSession.provider, activeSession.authorizationUrl)}
-                  >
-                    重新打开授权页
-                  </button>
+
+            {activeSession.instructions.sshTunnelCommand
+              ? renderGuideCard(
+                '云端部署',
+                'metapi 部署在 VPS、容器或远程主机时，浏览器访问到的是你自己电脑的 localhost。先在本地开 SSH 隧道，再继续登录。',
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>常规 SSH 隧道</div>
+                  {renderCodeBlock(activeSession.instructions.sshTunnelCommand)}
+                  {activeSession.instructions.sshTunnelKeyCommand && (
+                    <>
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>SSH Key 隧道</div>
+                      {renderCodeBlock(activeSession.instructions.sshTunnelKeyCommand)}
+                    </>
+                  )}
+                </div>,
+              )
+              : renderGuideCard(
+                '云端部署',
+                '当前没有检测到远程主机地址。如果你实际是云端部署，请用能访问服务器 127.0.0.1 回调端口的 SSH 隧道方式完成授权。',
+              )}
+
+            {renderGuideCard(
+              '手动回调',
+              `如果浏览器停在 localhost 错误页，复制浏览器地址栏里的完整 URL，等待 ${Math.max(1, Math.round(activeSession.instructions.manualCallbackDelayMs / 1000))} 秒后粘贴回来。`,
+              manualCallbackVisible ? (
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <textarea
+                    value={manualCallbackUrl}
+                    onChange={(event) => setManualCallbackUrl(event.target.value)}
+                    placeholder="粘贴完整的 callback URL，例如 http://localhost:1455/auth/callback?code=..."
+                    rows={3}
+                    style={{
+                      width: '100%',
+                      padding: '12px 14px',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-bg-card)',
+                      color: 'var(--color-text-primary)',
+                      resize: 'vertical',
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={handleSubmitManualCallback}
+                      disabled={manualCallbackSubmitting}
+                    >
+                      {manualCallbackSubmitting ? '提交中...' : '提交回调 URL'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => openOAuthPopup(activeSession.provider, activeSession.authorizationUrl)}
+                    >
+                      重新打开授权页
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div>手动回调入口将在几秒后可用。</div>
+              ) : (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>手动回调入口将在几秒后可用。</div>
+              ),
             )}
           </div>
         </div>
@@ -317,6 +392,11 @@ export default function OAuthManagement() {
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                       {connection.planType || 'unknown'} · {connection.modelCount} 个模型
                     </div>
+                    {connection.accountKey && (
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        连接标识: <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', color: 'var(--color-text-primary)' }}>{connection.accountKey}</span>
+                      </div>
+                    )}
                     {connection.projectId && (
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                         Project: {connection.projectId}

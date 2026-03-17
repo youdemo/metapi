@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -425,6 +426,113 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toEqual([]);
+  });
+
+  it('keeps multiple codex team workspaces with the same email as separate oauth connections', async () => {
+    const buildTokenExchange = (accountId: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: `oauth-access-token-${accountId}`,
+        refresh_token: `oauth-refresh-token-${accountId}`,
+        id_token: buildJwt({
+          email: 'team-user@example.com',
+          'https://api.openai.com/auth': {
+            chatgpt_account_id: accountId,
+            chatgpt_plan_type: 'team',
+          },
+        }),
+        expires_in: 3600,
+        token_type: 'Bearer',
+      }),
+      text: async () => JSON.stringify({ ok: true }),
+    });
+
+    const buildModelDiscovery = (modelId: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [{ id: modelId }],
+      }),
+      text: async () => JSON.stringify({ ok: true }),
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(buildTokenExchange('chatgpt-team-account-a'))
+      .mockResolvedValueOnce(buildModelDiscovery('gpt-5.4'))
+      .mockResolvedValueOnce(buildTokenExchange('chatgpt-team-account-b'))
+      .mockResolvedValueOnce(buildModelDiscovery('gpt-5.4'));
+
+    const startFirstResponse = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/providers/codex/start',
+      headers: {
+        host: 'metapi.example',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    const firstSession = startFirstResponse.json() as { state: string };
+
+    const submitFirstCallback = await app.inject({
+      method: 'POST',
+      url: `/api/oauth/sessions/${encodeURIComponent(firstSession.state)}/manual-callback`,
+      payload: {
+        callbackUrl: `http://localhost:1455/auth/callback?state=${encodeURIComponent(firstSession.state)}&code=oauth-code-team-a`,
+      },
+    });
+    expect(submitFirstCallback.statusCode).toBe(200);
+
+    const startSecondResponse = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/providers/codex/start',
+      headers: {
+        host: 'metapi.example',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    const secondSession = startSecondResponse.json() as { state: string };
+
+    const submitSecondCallback = await app.inject({
+      method: 'POST',
+      url: `/api/oauth/sessions/${encodeURIComponent(secondSession.state)}/manual-callback`,
+      payload: {
+        callbackUrl: `http://localhost:1455/auth/callback?state=${encodeURIComponent(secondSession.state)}&code=oauth-code-team-b`,
+      },
+    });
+    expect(submitSecondCallback.statusCode).toBe(200);
+
+    const accounts = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.oauthProvider, 'codex'))
+      .orderBy(schema.accounts.id)
+      .all();
+
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map((account) => account.oauthAccountKey)).toEqual([
+      'chatgpt-team-account-a',
+      'chatgpt-team-account-b',
+    ]);
+
+    const connectionsResponse = await app.inject({
+      method: 'GET',
+      url: '/api/oauth/connections',
+    });
+
+    expect(connectionsResponse.statusCode).toBe(200);
+    expect(connectionsResponse.json()).toMatchObject({
+      total: 2,
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          provider: 'codex',
+          email: 'team-user@example.com',
+          accountKey: 'chatgpt-team-account-a',
+        }),
+        expect.objectContaining({
+          provider: 'codex',
+          email: 'team-user@example.com',
+          accountKey: 'chatgpt-team-account-b',
+        }),
+      ]),
+    });
   });
 
   it('rejects malformed manual callback submissions', async () => {
