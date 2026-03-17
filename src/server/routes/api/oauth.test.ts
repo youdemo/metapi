@@ -129,6 +129,121 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
   });
 
+  it('discovers the Antigravity project via onboardUser polling when loadCodeAssist does not return one', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'antigravity-access-token',
+          refresh_token: 'antigravity-refresh-token',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope: 'cloud-platform',
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ email: 'antigravity-user@example.com' }),
+        text: async () => JSON.stringify({ email: 'antigravity-user@example.com' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          allowedTiers: [
+            { id: 'legacy-tier', isDefault: true },
+          ],
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          done: false,
+        }),
+        text: async () => JSON.stringify({ done: false }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          done: true,
+          response: {
+            cloudaicompanionProject: {
+              id: 'antigravity-auto-project',
+            },
+          },
+        }),
+        text: async () => JSON.stringify({ done: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          models: {
+            'gemini-3-pro-preview': { displayName: 'Gemini 3 Pro Preview' },
+          },
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      });
+
+    const startResponse = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/providers/antigravity/start',
+      headers: {
+        host: 'metapi.example',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    expect(startResponse.statusCode).toBe(200);
+    const startBody = startResponse.json() as { state: string };
+
+    const callbackResponse = await app.inject({
+      method: 'POST',
+      url: `/api/oauth/sessions/${encodeURIComponent(startBody.state)}/manual-callback`,
+      payload: {
+        callbackUrl: `http://localhost:51121/oauth-callback?state=${encodeURIComponent(startBody.state)}&code=antigravity-oauth-code-123`,
+      },
+    });
+    expect(callbackResponse.statusCode).toBe(200);
+    expect(callbackResponse.json()).toEqual({ success: true });
+
+    const sessionResponse = await app.inject({
+      method: 'GET',
+      url: `/api/oauth/sessions/${startBody.state}`,
+    });
+    expect(sessionResponse.statusCode).toBe(200);
+    expect(sessionResponse.json()).toMatchObject({
+      provider: 'antigravity',
+      status: 'success',
+    });
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({
+      oauthProvider: 'antigravity',
+      oauthProjectId: 'antigravity-auto-project',
+      username: 'antigravity-user@example.com',
+      accessToken: 'antigravity-access-token',
+    });
+
+    const parsed = JSON.parse(accounts[0]?.extraConfig || '{}');
+    expect(parsed.oauth).toMatchObject({
+      provider: 'antigravity',
+      email: 'antigravity-user@example.com',
+      projectId: 'antigravity-auto-project',
+      refreshToken: 'antigravity-refresh-token',
+    });
+
+    expect(String(fetchMock.mock.calls[2]?.[0] || '')).toContain('/v1internal:loadCodeAssist');
+    expect(String(fetchMock.mock.calls[3]?.[0] || '')).toContain('/v1internal:onboardUser');
+    expect(String(fetchMock.mock.calls[4]?.[0] || '')).toContain('/v1internal:onboardUser');
+  });
+
   it('starts a codex oauth session and exposes pending status', async () => {
     const startResponse = await app.inject({
       method: 'POST',
@@ -464,6 +579,32 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
+        json: async () => ({
+          cloudaicompanionProject: {
+            id: 'first-project-id',
+          },
+          allowedTiers: [
+            { id: 'legacy-tier', isDefault: true },
+          ],
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          done: true,
+          response: {
+            cloudaicompanionProject: {
+              id: 'first-project-id',
+            },
+          },
+        }),
+        text: async () => JSON.stringify({ done: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
         json: async () => ({ state: 'ENABLED' }),
         text: async () => JSON.stringify({ state: 'ENABLED' }),
       })
@@ -529,8 +670,123 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
 
     expect(String(fetchMock.mock.calls[1]?.[0] || '')).toContain('cloudresourcemanager.googleapis.com/v1/projects');
-    expect(String(fetchMock.mock.calls[2]?.[0] || '')).toContain('/projects/first-project-id/services/cloudaicompanion.googleapis.com');
+    expect(String(fetchMock.mock.calls[2]?.[0] || '')).toContain('/v1internal:loadCodeAssist');
+    expect(String(fetchMock.mock.calls[3]?.[0] || '')).toContain('/v1internal:onboardUser');
     expect(String(fetchMock.mock.calls[4]?.[0] || '')).toContain('/projects/first-project-id/services/cloudaicompanion.googleapis.com');
+    expect(String(fetchMock.mock.calls[6]?.[0] || '')).toContain('/projects/first-project-id/services/cloudaicompanion.googleapis.com');
+  });
+
+  it('onboards Gemini CLI into the backend project and auto-enables Cloud AI API when Google returns a free-tier project remap', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'gemini-access-token',
+          refresh_token: 'gemini-refresh-token',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope: 'cloud-platform',
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          projects: [
+            { projectId: 'gen-lang-client-source-project' },
+          ],
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          allowedTiers: [
+            { id: 'legacy-tier', isDefault: true },
+          ],
+        }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          done: true,
+          response: {
+            cloudaicompanionProject: {
+              id: 'gen-lang-client-0123456789',
+            },
+          },
+        }),
+        text: async () => JSON.stringify({ done: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'DISABLED' }),
+        text: async () => JSON.stringify({ state: 'DISABLED' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true }),
+        text: async () => JSON.stringify({ ok: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ email: 'gemini-free-user@example.com' }),
+        text: async () => JSON.stringify({ email: 'gemini-free-user@example.com' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'ENABLED' }),
+        text: async () => JSON.stringify({ state: 'ENABLED' }),
+      });
+
+    const startResponse = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/providers/gemini-cli/start',
+      headers: {
+        host: 'metapi.example',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    expect(startResponse.statusCode).toBe(200);
+    const startBody = startResponse.json() as { state: string };
+
+    const callbackResponse = await app.inject({
+      method: 'POST',
+      url: `/api/oauth/sessions/${encodeURIComponent(startBody.state)}/manual-callback`,
+      payload: {
+        callbackUrl: `http://localhost:8085/oauth2callback?state=${encodeURIComponent(startBody.state)}&code=gemini-oauth-code-free-tier`,
+      },
+    });
+    expect(callbackResponse.statusCode).toBe(200);
+    expect(callbackResponse.json()).toEqual({ success: true });
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({
+      oauthProvider: 'gemini-cli',
+      oauthProjectId: 'gen-lang-client-0123456789',
+      username: 'gemini-free-user@example.com',
+    });
+
+    const parsed = JSON.parse(accounts[0]?.extraConfig || '{}');
+    expect(parsed.oauth).toMatchObject({
+      projectId: 'gen-lang-client-0123456789',
+    });
+
+    expect(String(fetchMock.mock.calls[2]?.[0] || '')).toContain('/v1internal:loadCodeAssist');
+    expect(String(fetchMock.mock.calls[3]?.[0] || '')).toContain('/v1internal:onboardUser');
+    expect(String(fetchMock.mock.calls[4]?.[0] || '')).toContain('/projects/gen-lang-client-0123456789/services/cloudaicompanion.googleapis.com');
+    expect(String(fetchMock.mock.calls[5]?.[0] || '')).toContain('/projects/gen-lang-client-0123456789/services/cloudaicompanion.googleapis.com:enable');
+    expect(String(fetchMock.mock.calls[7]?.[0] || '')).toContain('/projects/gen-lang-client-0123456789/services/cloudaicompanion.googleapis.com');
   });
 
   it('lists oauth connection health metadata and supports deleting the connection', async () => {

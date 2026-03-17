@@ -16,6 +16,9 @@ export const ANTIGRAVITY_SANDBOX_DAILY_UPSTREAM_BASE_URL = 'https://daily-cloudc
 export const ANTIGRAVITY_GOOGLE_API_CLIENT = 'google-cloud-sdk vscode_cloudshelleditor/0.1';
 export const ANTIGRAVITY_USER_AGENT = 'google-api-nodejs-client/9.15.1';
 export const ANTIGRAVITY_CLIENT_METADATA = '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}';
+export const ANTIGRAVITY_INTERNAL_API_VERSION = 'v1internal';
+export const ANTIGRAVITY_ONBOARD_POLL_INTERVAL_MS = 2_000;
+export const ANTIGRAVITY_ONBOARD_MAX_ATTEMPTS = 5;
 
 const ANTIGRAVITY_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
@@ -32,6 +35,16 @@ type AntigravityOAuthTokenPayload = {
   expires_in?: unknown;
   scope?: unknown;
   expiry?: unknown;
+};
+
+type AntigravityLoadCodeAssistPayload = {
+  cloudaicompanionProject?: unknown;
+  allowedTiers?: unknown;
+};
+
+type AntigravityOnboardUserPayload = {
+  done?: unknown;
+  response?: unknown;
 };
 
 function asTrimmedString(value: unknown): string | undefined {
@@ -55,6 +68,65 @@ function parseExpiresAt(payload: AntigravityOAuthTokenPayload): number | undefin
     if (!Number.isNaN(parsed)) return parsed;
   }
   return undefined;
+}
+
+function buildAntigravityMetadata() {
+  return {
+    ideType: 'ANTIGRAVITY',
+    platform: 'PLATFORM_UNSPECIFIED',
+    pluginType: 'GEMINI',
+  };
+}
+
+function extractAntigravityProjectId(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return asTrimmedString(value);
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return asTrimmedString((value as { id?: unknown }).id);
+  }
+  return undefined;
+}
+
+function extractAntigravityDefaultTierId(payload: AntigravityLoadCodeAssistPayload): string {
+  const allowedTiers = Array.isArray(payload.allowedTiers) ? payload.allowedTiers : [];
+  for (const rawTier of allowedTiers) {
+    if (!rawTier || typeof rawTier !== 'object' || Array.isArray(rawTier)) continue;
+    const tier = rawTier as { id?: unknown; isDefault?: unknown };
+    if (tier.isDefault === true) {
+      const tierId = asTrimmedString(tier.id);
+      if (tierId) return tierId;
+    }
+  }
+  return 'legacy-tier';
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callAntigravityInternalApi<T>(
+  accessToken: string,
+  method: 'loadCodeAssist' | 'onboardUser',
+  body: Record<string, unknown>,
+): Promise<T | undefined> {
+  const response = await fetch(
+    `${ANTIGRAVITY_UPSTREAM_BASE_URL}/${ANTIGRAVITY_INTERNAL_API_VERSION}:${method}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': ANTIGRAVITY_USER_AGENT,
+        'X-Goog-Api-Client': ANTIGRAVITY_GOOGLE_API_CLIENT,
+        'Client-Metadata': ANTIGRAVITY_CLIENT_METADATA,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!response.ok) return undefined;
+  return response.json() as Promise<T>;
 }
 
 async function postAntigravityToken(body: URLSearchParams) {
@@ -99,34 +171,45 @@ async function fetchAntigravityUserEmail(accessToken: string): Promise<string | 
 }
 
 async function fetchAntigravityProjectId(accessToken: string): Promise<string | undefined> {
-  const response = await fetch(`${ANTIGRAVITY_UPSTREAM_BASE_URL}/v1internal:loadCodeAssist`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': ANTIGRAVITY_USER_AGENT,
-      'X-Goog-Api-Client': ANTIGRAVITY_GOOGLE_API_CLIENT,
-      'Client-Metadata': ANTIGRAVITY_CLIENT_METADATA,
-    },
-    body: JSON.stringify({
-      metadata: {
-        ideType: 'ANTIGRAVITY',
-        platform: 'PLATFORM_UNSPECIFIED',
-        pluginType: 'GEMINI',
+  const metadata = buildAntigravityMetadata();
+  const payload = await callAntigravityInternalApi<AntigravityLoadCodeAssistPayload>(
+    accessToken,
+    'loadCodeAssist',
+    { metadata },
+  );
+  if (!payload) return undefined;
+
+  const discoveredFromLoad = extractAntigravityProjectId(payload.cloudaicompanionProject);
+  if (discoveredFromLoad) {
+    return discoveredFromLoad;
+  }
+
+  const tierId = extractAntigravityDefaultTierId(payload);
+  for (let attempt = 0; attempt < ANTIGRAVITY_ONBOARD_MAX_ATTEMPTS; attempt += 1) {
+    const onboardPayload = await callAntigravityInternalApi<AntigravityOnboardUserPayload>(
+      accessToken,
+      'onboardUser',
+      {
+        tierId,
+        metadata,
       },
-    }),
-  });
-  if (!response.ok) return undefined;
-  const payload = await response.json() as {
-    cloudaicompanionProject?: unknown;
-  };
-  if (typeof payload.cloudaicompanionProject === 'string') {
-    return asTrimmedString(payload.cloudaicompanionProject);
+    );
+    if (!onboardPayload) return undefined;
+    if (onboardPayload.done === true) {
+      const response = (
+        onboardPayload.response
+        && typeof onboardPayload.response === 'object'
+        && !Array.isArray(onboardPayload.response)
+      )
+        ? onboardPayload.response as { cloudaicompanionProject?: unknown }
+        : undefined;
+      return extractAntigravityProjectId(response?.cloudaicompanionProject);
+    }
+    if ((attempt + 1) < ANTIGRAVITY_ONBOARD_MAX_ATTEMPTS) {
+      await sleep(ANTIGRAVITY_ONBOARD_POLL_INTERVAL_MS);
+    }
   }
-  if (payload.cloudaicompanionProject && typeof payload.cloudaicompanionProject === 'object') {
-    return asTrimmedString((payload.cloudaicompanionProject as { id?: unknown }).id);
-  }
+
   return undefined;
 }
 

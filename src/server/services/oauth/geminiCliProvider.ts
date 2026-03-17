@@ -17,6 +17,11 @@ export const GEMINI_CLI_UPSTREAM_BASE_URL = 'https://cloudcode-pa.googleapis.com
 export const GEMINI_CLI_GOOGLE_API_CLIENT = 'google-genai-sdk/1.41.0 gl-node/v22.19.0';
 export const GEMINI_CLI_USER_AGENT = 'GeminiCLI/0.31.0/unknown (win32; x64)';
 export const GEMINI_CLI_REQUIRED_SERVICE = 'cloudaicompanion.googleapis.com';
+export const GEMINI_CLI_INTERNAL_API_VERSION = 'v1internal';
+export const GEMINI_CLI_AUTO_ONBOARD_POLL_INTERVAL_MS = 2_000;
+export const GEMINI_CLI_AUTO_ONBOARD_MAX_ATTEMPTS = 15;
+export const GEMINI_CLI_ONBOARD_POLL_INTERVAL_MS = 5_000;
+export const GEMINI_CLI_ONBOARD_MAX_ATTEMPTS = 6;
 
 function requireGeminiCliOAuthConfig() {
   if (!GEMINI_CLI_CLIENT_ID) {
@@ -46,6 +51,16 @@ type GeminiOAuthTokenPayload = {
   expiry?: unknown;
 };
 
+type GeminiLoadCodeAssistPayload = {
+  cloudaicompanionProject?: unknown;
+  allowedTiers?: unknown;
+};
+
+type GeminiOnboardUserPayload = {
+  done?: unknown;
+  response?: unknown;
+};
+
 function asTrimmedString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -67,6 +82,69 @@ function parseExpiresAt(payload: GeminiOAuthTokenPayload): number | undefined {
     if (!Number.isNaN(parsed)) return parsed;
   }
   return undefined;
+}
+
+function buildGeminiCliMetadata() {
+  return {
+    ideType: 'IDE_UNSPECIFIED',
+    platform: 'PLATFORM_UNSPECIFIED',
+    pluginType: 'GEMINI',
+  };
+}
+
+function extractGeminiProjectId(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return asTrimmedString(value);
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return asTrimmedString((value as { id?: unknown }).id);
+  }
+  return undefined;
+}
+
+function extractGeminiDefaultTierId(payload: GeminiLoadCodeAssistPayload): string {
+  const allowedTiers = Array.isArray(payload.allowedTiers) ? payload.allowedTiers : [];
+  for (const rawTier of allowedTiers) {
+    if (!rawTier || typeof rawTier !== 'object' || Array.isArray(rawTier)) continue;
+    const tier = rawTier as { id?: unknown; isDefault?: unknown };
+    if (tier.isDefault === true) {
+      const tierId = asTrimmedString(tier.id);
+      if (tierId) return tierId;
+    }
+  }
+  return 'legacy-tier';
+}
+
+function isGeminiFreeUserProject(input: {
+  requestedProjectId?: string;
+  tierId: string;
+}) {
+  const projectId = (input.requestedProjectId || '').trim();
+  const tierId = input.tierId.trim();
+  return projectId.startsWith('gen-lang-client-')
+    || tierId.toUpperCase() === 'FREE'
+    || tierId.toUpperCase() === 'LEGACY';
+}
+
+function isSameGeminiProjectId(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function extractGeminiServiceErrorMessage(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: unknown };
+    };
+    return asTrimmedString(parsed.error?.message) || trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function postGeminiToken(body: URLSearchParams) {
@@ -110,6 +188,32 @@ async function fetchGeminiUserEmail(accessToken: string): Promise<string | undef
   return asTrimmedString(payload.email);
 }
 
+async function callGeminiCliInternalApi<T>(
+  accessToken: string,
+  method: 'loadCodeAssist' | 'onboardUser',
+  body: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch(
+    `${GEMINI_CLI_UPSTREAM_BASE_URL}/${GEMINI_CLI_INTERNAL_API_VERSION}:${method}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': GEMINI_CLI_USER_AGENT,
+        'X-Goog-Api-Client': GEMINI_CLI_GOOGLE_API_CLIENT,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(text || `api request failed with status ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 async function fetchGcpProjects(accessToken: string): Promise<string[]> {
   const response = await fetch(GEMINI_CLI_PROJECTS_URL, {
     headers: {
@@ -127,45 +231,159 @@ async function fetchGcpProjects(accessToken: string): Promise<string[]> {
     .filter((projectId): projectId is string => !!projectId);
 }
 
-async function ensureGeminiProjectEnabled(accessToken: string, projectId: string): Promise<void> {
-  const response = await fetch(
+async function checkCloudAIAPIEnabled(accessToken: string, projectId: string): Promise<void> {
+  const checkResponse = await fetch(
     `${GEMINI_CLI_SERVICE_USAGE_URL}/projects/${encodeURIComponent(projectId)}/services/${encodeURIComponent(GEMINI_CLI_REQUIRED_SERVICE)}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json',
+        'User-Agent': GEMINI_CLI_USER_AGENT,
+        'X-Goog-Api-Client': GEMINI_CLI_GOOGLE_API_CLIENT,
       },
     },
   );
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(text || `service usage lookup failed with status ${response.status}`);
+  if (checkResponse.ok) {
+    const payload = await checkResponse.json() as { state?: unknown };
+    const state = asTrimmedString(payload.state);
+    if ((state || '').toUpperCase() === 'ENABLED') {
+      return;
+    }
   }
-  const payload = await response.json() as { state?: unknown };
-  const state = asTrimmedString(payload.state);
-  if ((state || '').toUpperCase() !== 'ENABLED') {
-    throw new Error(`Cloud AI API not enabled for project ${projectId}`);
+
+  const response = await fetch(
+    `${GEMINI_CLI_SERVICE_USAGE_URL}/projects/${encodeURIComponent(projectId)}/services/${encodeURIComponent(GEMINI_CLI_REQUIRED_SERVICE)}:enable`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': GEMINI_CLI_USER_AGENT,
+        'X-Goog-Api-Client': GEMINI_CLI_GOOGLE_API_CLIENT,
+      },
+      body: '{}',
+    },
+  );
+  const text = await response.text().catch(() => '');
+  if (response.ok) {
+    return;
   }
+  if (response.status === 400 && extractGeminiServiceErrorMessage(text).toLowerCase().includes('already enabled')) {
+    return;
+  }
+  throw new Error(`project activation required: ${extractGeminiServiceErrorMessage(text) || `HTTP ${response.status}`}`);
 }
 
-async function resolveGeminiProjectId(accessToken: string, requestedProjectId?: string): Promise<string> {
+async function performGeminiCliSetup(
+  accessToken: string,
+  requestedProjectId: string,
+): Promise<string> {
+  const trimmedRequest = requestedProjectId.trim();
+  const explicitProject = !!trimmedRequest;
+  const metadata = buildGeminiCliMetadata();
+  const loadResponse = await callGeminiCliInternalApi<GeminiLoadCodeAssistPayload>(
+    accessToken,
+    'loadCodeAssist',
+    explicitProject
+      ? {
+        metadata,
+        cloudaicompanionProject: trimmedRequest,
+      }
+      : { metadata },
+  );
+
+  const tierId = extractGeminiDefaultTierId(loadResponse);
+  let projectId = trimmedRequest || extractGeminiProjectId(loadResponse.cloudaicompanionProject) || '';
+
+  if (!projectId) {
+    for (let attempt = 0; attempt < GEMINI_CLI_AUTO_ONBOARD_MAX_ATTEMPTS; attempt += 1) {
+      const onboardResponse = await callGeminiCliInternalApi<GeminiOnboardUserPayload>(
+        accessToken,
+        'onboardUser',
+        {
+          tierId,
+          metadata,
+        },
+      );
+      if (onboardResponse.done === true) {
+        const response = (
+          onboardResponse.response
+          && typeof onboardResponse.response === 'object'
+          && !Array.isArray(onboardResponse.response)
+        )
+          ? onboardResponse.response as { cloudaicompanionProject?: unknown }
+          : undefined;
+        projectId = extractGeminiProjectId(response?.cloudaicompanionProject) || '';
+        break;
+      }
+      if ((attempt + 1) < GEMINI_CLI_AUTO_ONBOARD_MAX_ATTEMPTS) {
+        await sleep(GEMINI_CLI_AUTO_ONBOARD_POLL_INTERVAL_MS);
+      }
+    }
+  }
+
+  if (!projectId) {
+    throw new Error('gemini cli: project selection required');
+  }
+
+  let finalProjectId = projectId;
+  for (let attempt = 0; attempt < GEMINI_CLI_ONBOARD_MAX_ATTEMPTS; attempt += 1) {
+    const onboardResponse = await callGeminiCliInternalApi<GeminiOnboardUserPayload>(
+      accessToken,
+      'onboardUser',
+      {
+        tierId,
+        metadata,
+        cloudaicompanionProject: projectId,
+      },
+    );
+    if (onboardResponse.done === true) {
+      const response = (
+        onboardResponse.response
+        && typeof onboardResponse.response === 'object'
+        && !Array.isArray(onboardResponse.response)
+      )
+        ? onboardResponse.response as { cloudaicompanionProject?: unknown }
+        : undefined;
+      const responseProjectId = extractGeminiProjectId(response?.cloudaicompanionProject) || '';
+      if (responseProjectId) {
+        if (explicitProject && !isSameGeminiProjectId(responseProjectId, projectId)) {
+          finalProjectId = isGeminiFreeUserProject({ requestedProjectId: projectId, tierId })
+            ? responseProjectId
+            : projectId;
+        } else {
+          finalProjectId = responseProjectId;
+        }
+      }
+      return finalProjectId || projectId;
+    }
+    if ((attempt + 1) < GEMINI_CLI_ONBOARD_MAX_ATTEMPTS) {
+      await sleep(GEMINI_CLI_ONBOARD_POLL_INTERVAL_MS);
+    }
+  }
+
+  if (finalProjectId) {
+    return finalProjectId;
+  }
+  throw new Error('gemini cli: onboarding timed out');
+}
+
+async function ensureGeminiProjectAndOnboard(
+  accessToken: string,
+  requestedProjectId?: string,
+): Promise<string> {
   const explicitProject = asTrimmedString(requestedProjectId);
   if (explicitProject) {
-    await ensureGeminiProjectEnabled(accessToken, explicitProject);
-    return explicitProject;
+    return performGeminiCliSetup(accessToken, explicitProject);
   }
 
   const projects = await fetchGcpProjects(accessToken);
-  if (projects.length <= 0) {
-    throw new Error('no Google Cloud projects available for this account');
-  }
-
   const firstProject = projects[0];
   if (!firstProject) {
     throw new Error('no Google Cloud projects available for this account');
   }
-  await ensureGeminiProjectEnabled(accessToken, firstProject);
-  return firstProject;
+  return performGeminiCliSetup(accessToken, firstProject);
 }
 
 export const geminiCliOauthProvider: OAuthProviderDefinition = {
@@ -213,7 +431,8 @@ export const geminiCliOauthProvider: OAuthProviderDefinition = {
       redirect_uri: redirectUri,
       grant_type: 'authorization_code',
     }));
-    const resolvedProjectId = await resolveGeminiProjectId(token.accessToken, projectId);
+    const resolvedProjectId = await ensureGeminiProjectAndOnboard(token.accessToken, projectId);
+    await checkCloudAIAPIEnabled(token.accessToken, resolvedProjectId);
     const email = await fetchGeminiUserEmail(token.accessToken);
     return {
       ...token,
@@ -231,16 +450,17 @@ export const geminiCliOauthProvider: OAuthProviderDefinition = {
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
     }));
-    if (oauth?.projectId) {
-      await ensureGeminiProjectEnabled(token.accessToken, oauth.projectId);
-    }
+    const nextProjectId = oauth?.projectId
+      ? oauth.projectId
+      : await ensureGeminiProjectAndOnboard(token.accessToken);
+    await checkCloudAIAPIEnabled(token.accessToken, nextProjectId);
     const email = await fetchGeminiUserEmail(token.accessToken);
     return {
       ...token,
       email,
       accountKey: email,
       accountId: email,
-      projectId: oauth?.projectId,
+      projectId: nextProjectId,
     };
   },
   buildProxyHeaders: () => ({
